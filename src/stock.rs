@@ -10,10 +10,74 @@ pub struct StockData {
     pub change_percent: f64,
 }
 
-pub fn fetch_stock_data(symbol: &str) -> Result<StockData, Box<dyn std::error::Error>> {
+#[derive(Debug, Clone, Copy)]
+pub enum TimeFrame {
+    OneDay,
+    OneWeek,
+    OneMonth,
+    ThreeMonths,
+    OneYear,
+}
+
+impl TimeFrame {
+    pub fn to_api_string(&self) -> &str {
+        match self {
+            TimeFrame::OneDay => "1d",
+            TimeFrame::OneWeek => "5d",
+            TimeFrame::OneMonth => "1mo",
+            TimeFrame::ThreeMonths => "3mo",
+            TimeFrame::OneYear => "1y",
+        }
+    }
+
+    pub fn to_interval(&self) -> &str {
+        match self {
+            TimeFrame::OneDay => "5m",
+            TimeFrame::OneWeek => "30m",
+            TimeFrame::OneMonth => "1d",
+            TimeFrame::ThreeMonths => "1d",
+            TimeFrame::OneYear => "1wk",
+        }
+    }
+
+    pub fn display(&self) -> &str {
+        match self {
+            TimeFrame::OneDay => "1 Day",
+            TimeFrame::OneWeek => "1 Week",
+            TimeFrame::OneMonth => "1 Month",
+            TimeFrame::ThreeMonths => "3 Months",
+            TimeFrame::OneYear => "1 Year",
+        }
+    }
+
+    pub fn next(&self) -> Self {
+        match self {
+            TimeFrame::OneDay => TimeFrame::OneWeek,
+            TimeFrame::OneWeek => TimeFrame::OneMonth,
+            TimeFrame::OneMonth => TimeFrame::ThreeMonths,
+            TimeFrame::ThreeMonths => TimeFrame::OneYear,
+            TimeFrame::OneYear => TimeFrame::OneDay,
+        }
+    }
+
+    pub fn prev(&self) -> Self {
+        match self {
+            TimeFrame::OneDay => TimeFrame::OneYear,
+            TimeFrame::OneWeek => TimeFrame::OneDay,
+            TimeFrame::OneMonth => TimeFrame::OneWeek,
+            TimeFrame::ThreeMonths => TimeFrame::OneMonth,
+            TimeFrame::OneYear => TimeFrame::ThreeMonths,
+        }
+    }
+}
+
+
+pub fn fetch_stock_data(symbol: &str, timeframe: TimeFrame) -> Result<StockData, Box<dyn std::error::Error>> {
     let url = format!(
-        "https://query1.finance.yahoo.com/v8/finance/chart/{}?interval=1d&range=1mo",
-        symbol
+        "https://query1.finance.yahoo.com/v8/finance/chart/{}?interval={}&range={}",
+        symbol,
+        timeframe.to_interval(),
+        timeframe.to_api_string()
     );
     
     let response = ureq::get(&url).call()?;
