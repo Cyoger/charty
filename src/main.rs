@@ -3,72 +3,47 @@ use crossterm::{
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
-use ratatui::{
-    backend::CrosstermBackend,
-    layout::{Constraint, Direction, Layout},
-    widgets::{Block, Borders, Paragraph, Chart, Dataset, Axis, GraphType},
-    symbols,
-    style::{Style, Color, Modifier},
-    text::{Line, Span},
-    Frame,
-    Terminal,
-};
+use ratatui::{backend::CrosstermBackend, Terminal};
 use std::io;
+use tokio::sync::mpsc;
+use std::sync::Arc;
+use tokio::sync::Mutex;
 
 mod stock;
-use stock::TimeFrame;
+mod ui;
+mod websocket;
 
-struct App {
-    symbol: String,
-    timeframe: TimeFrame,
-    stock_data: Option<stock::StockData>,
-    input_mode: bool,
-    input_buffer: String,
-    error_message: Option<String>,
-    loading: bool,
-}
+use ui::{App, AppState};
+use websocket::LivePrice;
+use std::fs::OpenOptions;
+use std::io::Write;
 
-impl App {
-    fn new() -> Self {
-        Self {
-            symbol: "AAPL".to_string(),
-            timeframe: TimeFrame::OneMonth,
-            stock_data: None,
-            input_mode: false,
-            input_buffer: String::new(),
-            error_message: None,
-            loading: false,
-        }
-    }
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
-    fn fetch_data(&mut self) {
-        self.loading = true;
-        match stock::fetch_stock_data(&self.symbol, self.timeframe) {
-            Ok(data) => {
-                self.stock_data = Some(data);
-                self.error_message = None;
-            }
-            Err(e) => {
-                self.error_message = Some(format!("Error: {}", e));
-            }
-        }
-        self.loading = false;
-    }
-}
+    dotenv::dotenv().ok(); 
+    let mut log_file = OpenOptions::new()
+    .create(true)
+    .append(true)
+    .open("debug.log")?;
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+    writeln!(log_file, "Starting app...")?;
+
     let mut app = App::new();
-    
-    app.fetch_data();
-    
+
+    let (tx, mut rx) = mpsc::unbounded_channel::<LivePrice>();
+
+    // Setup terminal
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let res = run_app(&mut terminal, &mut app);
+    // Run the app
+    let res = run_app(&mut terminal, &mut app, &mut rx, tx).await;
 
+    // Restore terminal
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     terminal.show_cursor()?;
@@ -80,204 +55,161 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn run_app(
+async fn run_app(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     app: &mut App,
+    rx: &mut mpsc::UnboundedReceiver<LivePrice>,
+    tx: mpsc::UnboundedSender<LivePrice>,
 ) -> Result<(), io::Error> {
-    loop {
-        terminal.draw(|f| ui(f, app))?;
+    let mut ws_task_handle: Option<tokio::task::JoinHandle<()>> = None;
 
+    loop {
+        terminal.draw(|f| ui::ui(f, app))?;
+
+        // Check for live price updates
+        if let Ok(live_price) = rx.try_recv() {
+            if app.live_updates_enabled {
+                app.update_live_price(live_price.price);
+            }
+        }
+
+        // Check for keyboard input
         if event::poll(std::time::Duration::from_millis(100))? {
             if let Event::Key(key) = event::read()? {
-                if handle_input(app, key.code) {
-                    return Ok(()); 
+                if handle_input(app, key.code, &mut ws_task_handle, &tx).await {
+                    // Stop WebSocket before quitting
+                    stop_websocket(&mut ws_task_handle, &app.ws_should_stop).await;
+                    return Ok(());
                 }
             }
         }
     }
 }
 
-fn ui(f: &mut Frame, app: &App) {
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(3),
-            Constraint::Min(0),
-            Constraint::Length(5),
-        ])
-        .split(f.area());
-    
-    render_header(f, app, chunks[0]);
-    render_chart(f, app, chunks[1]);
-    render_footer(f, app, chunks[2]);
-}
-
-fn render_header(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
-    if let Some(ref stock_data) = app.stock_data {
-        let price_color = if stock_data.change >= 0.0 {
-            Color::Green
-        } else {
-            Color::Red
-        };
-        
-        let change_symbol = if stock_data.change >= 0.0 { "▲" } else { "▼" };
-        
-        let header_text = vec![
-            Line::from(vec![
-                Span::raw(format!("{} ", stock_data.symbol)),
-                Span::styled(
-                    format!("${:.2}", stock_data.current_price),
-                    Style::default().fg(price_color).add_modifier(Modifier::BOLD),
-                ),
-                Span::raw("  "),
-                Span::styled(
-                    format!("{} ${:.2} ({:.2}%)", 
-                        change_symbol, 
-                        stock_data.change.abs(), 
-                        stock_data.change_percent.abs()
-                    ),
-                    Style::default().fg(price_color),
-                ),
-                Span::raw(format!("  [{}]", app.timeframe.display())),
-            ]),
-        ];
-        
-        let header = Paragraph::new(header_text)
-            .block(Block::default().borders(Borders::ALL).title("Stock Info"));
-        f.render_widget(header, area);
-    } else if app.loading {
-        let loading_text = Paragraph::new("Loading...")
-            .block(Block::default().borders(Borders::ALL).title("Stock Info"));
-        f.render_widget(loading_text, area);
+async fn stop_websocket(
+    ws_task_handle: &mut Option<tokio::task::JoinHandle<()>>,
+    should_stop: &Arc<Mutex<bool>>,
+) {
+    *should_stop.lock().await = true;
+    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+    if let Some(handle) = ws_task_handle.take() {
+        handle.abort();
     }
 }
 
-fn render_chart(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
-    if app.loading {
-        let loading = Paragraph::new("Loading stock data...")
-            .style(Style::default().fg(Color::Yellow))
-            .block(Block::default().borders(Borders::ALL).title("Chart"));
-        f.render_widget(loading, area);
-        return;
-    }
-    
-    if let Some(ref stock_data) = app.stock_data {
-        let price_color = if stock_data.change >= 0.0 {
-            Color::Green
-        } else {
-            Color::Red
-        };
-        
-        let chart_data: Vec<(f64, f64)> = stock_data
-            .prices
-            .iter()
-            .enumerate()
-            .map(|(i, &price)| (i as f64, price))
-            .collect();
-        
-        let max_price = stock_data.prices.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
-        let min_price = stock_data.prices.iter().fold(f64::INFINITY, |a, &b| a.min(b));
-        let max_x = (stock_data.prices.len() - 1) as f64;
-        
-        let first_date = stock_data.timestamps.first().unwrap().format("%m/%d").to_string();
-        let last_date = stock_data.timestamps.last().unwrap().format("%m/%d").to_string();
-        
-        let dataset = Dataset::default()
-            .name(stock_data.symbol.as_str())
-            .marker(symbols::Marker::Braille)
-            .graph_type(GraphType::Line)
-            .style(Style::default().fg(price_color))
-            .data(&chart_data);
-        
-        let x_labels = vec![
-            Span::raw(first_date),
-            Span::raw(last_date),
-        ];
-        
-        let y_labels = vec![
-            Span::raw(format!("${:.0}", min_price)),
-            Span::raw(format!("${:.0}", (min_price + max_price) / 2.0)),
-            Span::raw(format!("${:.0}", max_price)),
-        ];
-        
-        let chart = Chart::new(vec![dataset])
-            .block(Block::default()
-                .borders(Borders::ALL)
-                .title(format!("{} - {}", stock_data.symbol, app.timeframe.display())))
-            .x_axis(
-                Axis::default()
-                    .title("Date")
-                    .style(Style::default().fg(Color::Gray))
-                    .bounds([0.0, max_x])
-                    .labels(x_labels)
-            )
-            .y_axis(
-                Axis::default()
-                    .title("Price")
-                    .style(Style::default().fg(Color::Gray))
-                    .bounds([min_price - 5.0, max_price + 5.0])
-                    .labels(y_labels)
-            );
-        
-        f.render_widget(chart, area);
-    } else if let Some(ref error) = app.error_message {
-        let error_text = Paragraph::new(error.as_str())
-            .style(Style::default().fg(Color::Red))
-            .block(Block::default().borders(Borders::ALL).title("Error"));
-        f.render_widget(error_text, area);
-    }
-}
+async fn handle_input(
+    app: &mut App,
+    key: KeyCode,
+    ws_task_handle: &mut Option<tokio::task::JoinHandle<()>>,
+    tx: &mpsc::UnboundedSender<LivePrice>,
+) -> bool {
+    match app.state {
+        AppState::Landing => {
+            if app.input_mode {
+                match key {
+                    KeyCode::Char('q') if app.input_buffer.is_empty() => return true,
+                    KeyCode::Enter => {
+                        if !app.input_buffer.is_empty() {
+                            app.symbol = app.input_buffer.to_uppercase();
+                            app.input_buffer.clear();
+                            app.input_mode = false;
+                            app.fetch_data();
 
-fn render_footer(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
-    let footer_text = if app.input_mode {
-        vec![
-            Line::from("Enter stock symbol (press Enter to confirm, Esc to cancel):"),
-            Line::from(Span::styled(
-                format!("> {}", app.input_buffer),
-                Style::default().fg(Color::Yellow),
-            )),
-        ]
-    } else {
-        vec![
-            Line::from("Controls:"),
-            Line::from("'s': Change symbol | '←/→': Change timeframe | 'r': Refresh | 'q': Quit"),
-        ]
-    };
-    
-    let footer = Paragraph::new(footer_text)
-        .block(Block::default().borders(Borders::ALL).title("Controls"));
-    f.render_widget(footer, area);
-}
+                            // Start WebSocket for new symbol
+                            stop_websocket(ws_task_handle, &app.ws_should_stop).await;
+                            *app.ws_should_stop.lock().await = false;
+                            
+                            let symbol_clone = app.symbol.clone();
+                            let base_price = app.get_base_price();
+                            let tx_clone = tx.clone();
+                            let should_stop = app.ws_should_stop.clone();
+                            
+                            *ws_task_handle = Some(tokio::spawn(async move {
+                                websocket::start_websocket(symbol_clone, base_price, tx_clone, should_stop).await;
+                            }));
+                        }
+                    }
+                    KeyCode::Esc => {
+                        app.input_buffer.clear();
+                        app.input_mode = false;
+                    }
+                    KeyCode::Backspace => {
+                        app.input_buffer.pop();
+                    }
+                    KeyCode::Char(c) => {
+                        app.input_buffer.push(c);
+                    }
+                    _ => {}
+                }
+            } else {
+                match key {
+                    KeyCode::Char('q') => return true,
+                    KeyCode::Char('s') => {
+                        app.input_mode = true;
+                    }
+                    KeyCode::Up => {
+                        app.previous_popular();
+                    }
+                    KeyCode::Down => {
+                        app.next_popular();
+                    }
+                    KeyCode::Enter => {
+                        app.select_popular();
 
-fn handle_input(app: &mut App, key: KeyCode) -> bool {
-    if app.input_mode {
-        match key {
-            KeyCode::Enter => {
-                if !app.input_buffer.is_empty() {
-                    app.symbol = app.input_buffer.to_uppercase();
-                    app.input_buffer.clear();
-                    app.input_mode = false;
-                    app.fetch_data();
+                        // Start WebSocket for selected symbol
+                        stop_websocket(ws_task_handle, &app.ws_should_stop).await;
+                        *app.ws_should_stop.lock().await = false;
+                        
+                        let symbol_clone = app.symbol.clone();
+                        let base_price = app.get_base_price();
+                        let tx_clone = tx.clone();
+                        let should_stop = app.ws_should_stop.clone();
+                        
+                        *ws_task_handle = Some(tokio::spawn(async move {
+                            websocket::start_websocket(symbol_clone, base_price, tx_clone, should_stop).await;
+                        }));
+                    }
+                    _ => {}
                 }
             }
-            KeyCode::Esc => {
-                app.input_buffer.clear();
-                app.input_mode = false;
-            }
-            KeyCode::Backspace => {
-                app.input_buffer.pop();
-            }
-            KeyCode::Char(c) => {
-                app.input_buffer.push(c);
-            }
-            _ => {}
+            false
         }
-        false
-    } else {
-        match key {
+        AppState::Chart => match key {
             KeyCode::Char('q') => true,
+            KeyCode::Char('b') => {
+                app.state = AppState::Landing;
+                app.stock_data = None;
+                app.error_message = None;
+                app.live_updates_enabled = false;
+                
+                // Stop WebSocket when going back
+                stop_websocket(ws_task_handle, &app.ws_should_stop).await;
+                false
+            }
             KeyCode::Char('s') => {
+                app.state = AppState::Landing;
                 app.input_mode = true;
+                false
+            }
+            KeyCode::Char('l') => {
+                app.live_updates_enabled = !app.live_updates_enabled;
+                
+                // Start WebSocket if enabling live mode
+                if app.live_updates_enabled {
+                    stop_websocket(ws_task_handle, &app.ws_should_stop).await;
+                    *app.ws_should_stop.lock().await = false;
+                    
+                    let symbol_clone = app.symbol.clone();
+                    let base_price = app.get_base_price();
+                    let tx_clone = tx.clone();
+                    let should_stop = app.ws_should_stop.clone();
+                    
+                    *ws_task_handle = Some(tokio::spawn(async move {
+                        websocket::start_websocket(symbol_clone, base_price, tx_clone, should_stop).await;
+                    }));
+                } else {
+                    stop_websocket(ws_task_handle, &app.ws_should_stop).await;
+                }
                 false
             }
             KeyCode::Char('r') => {
@@ -295,6 +227,6 @@ fn handle_input(app: &mut App, key: KeyCode) -> bool {
                 false
             }
             _ => false,
-        }
+        },
     }
 }
