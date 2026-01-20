@@ -9,7 +9,46 @@ use ratatui::{
 
 use crate::stock::StockData;
 use std::sync::Arc;
+use std::time::Instant;
+use std::time::Duration;
+use std::collections::VecDeque;
 use tokio::sync::Mutex;
+use chrono::{DateTime, Utc, Local};
+
+#[derive(Debug, Clone)]
+pub enum WebSocketStatus {
+    Idle,
+    Connecting,
+    Connected { since: DateTime<Utc> },
+    Reconnecting { attempt: u32, next_retry_in: Duration },
+    Error { message: String, recoverable: bool },
+    Disconnected,
+}
+
+pub struct UpdateThrottle {
+    last_update: Instant,
+    min_interval: Duration,
+}
+
+impl UpdateThrottle {
+    pub fn new(min_interval: Duration) -> Self {
+        Self {
+            last_update: Instant::now(),
+            min_interval,
+        }
+    }
+
+    pub fn should_update(&mut self) -> bool {
+        let now = Instant::now();
+        if now.duration_since(self.last_update) >= self.min_interval {
+            self.last_update = now;
+            true
+        } else {
+            false
+        }
+    }
+}
+
 pub enum AppState {
     Landing,
     Chart,
@@ -28,14 +67,19 @@ pub struct App {
     pub last_live_price: Option<f64>,
     pub popular_list_state: ListState,
     pub popular_stocks: Vec<(&'static str, &'static str)>,
-	pub ws_should_stop: Arc<Mutex<bool>>,  
+	pub ws_should_stop: Arc<Mutex<bool>>,
+    pub ws_status: WebSocketStatus,
+    pub ws_last_update: Option<DateTime<Utc>>,
+    pub ws_error_log: VecDeque<String>,
+    pub update_throttle: UpdateThrottle,
+    pub show_error_log: bool,
 }
 
 impl App {
     pub fn new() -> Self {
         let mut list_state = ListState::default();
         list_state.select(Some(0));
-        
+
         Self {
             state: AppState::Landing,
             symbol: String::new(),
@@ -63,6 +107,11 @@ impl App {
                 ("META", "Meta Platforms Inc."),
             ],
 			ws_should_stop: Arc::new(Mutex::new(false)),
+            ws_status: WebSocketStatus::Idle,
+            ws_last_update: None,
+            ws_error_log: VecDeque::new(),
+            update_throttle: UpdateThrottle::new(Duration::from_millis(500)),
+            show_error_log: false,
         }
     }
 
@@ -84,22 +133,39 @@ impl App {
 
     pub fn update_live_price(&mut self, price: f64) {
         self.last_live_price = Some(price);
-        
+        self.ws_last_update = Some(Utc::now());
+
         if let Some(ref mut data) = self.stock_data {
+            // Update live price
+            data.live_current_price = Some(price);
             data.current_price = price;
-            
-            if let Some(&first_price) = data.prices.first() {
-                data.change = price - first_price;
-                data.change_percent = (data.change / first_price) * 100.0;
+
+            // Add to live ticks (separate from historical data)
+            data.live_ticks.push_back(crate::stock::LiveTick {
+                price,
+                timestamp: Utc::now(),
+            });
+
+            // Keep only last 100 live ticks
+            if data.live_ticks.len() > 100 {
+                data.live_ticks.pop_front();
             }
-            
-            data.prices.push(price);
-            data.timestamps.push(chrono::Utc::now());
-            
-            if data.prices.len() > 100 {
-                data.prices.remove(0);
-                data.timestamps.remove(0);
-            }
+
+            // Calculate change from base historical price, not first historical price
+            data.change = price - data.base_historical_price;
+            data.change_percent = (data.change / data.base_historical_price) * 100.0;
+        }
+    }
+
+    pub fn add_error_to_log(&mut self, error: String) {
+        let timestamp = Utc::now().format("%H:%M:%S").to_string();
+        let error_entry = format!("[{}] {}", timestamp, error);
+
+        self.ws_error_log.push_back(error_entry);
+
+        // Keep only last 10 errors
+        if self.ws_error_log.len() > 10 {
+            self.ws_error_log.pop_front();
         }
     }
 
@@ -286,6 +352,11 @@ fn render_chart_view(f: &mut Frame, app: &App) {
     render_header(f, app, chunks[0]);
     render_chart(f, app, chunks[1]);
     render_footer(f, app, chunks[2]);
+
+    // Render error log popup if requested
+    if app.show_error_log {
+        render_error_log(f, app);
+    }
 }
 
 fn render_header(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
@@ -299,12 +370,59 @@ fn render_header(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
         let change_symbol = if stock_data.change >= 0.0 { "▲" } else { "▼" };
 
         let live_indicator = if app.live_updates_enabled {
-            Span::styled(
-                " [LIVE ●]",
-                Style::default()
-                    .fg(Color::Green)
-                    .add_modifier(Modifier::BOLD),
-            )
+            match &app.ws_status {
+                WebSocketStatus::Connected { since } => {
+                    let duration = Utc::now().signed_duration_since(*since);
+                    let seconds = duration.num_seconds();
+                    Span::styled(
+                        format!(" [LIVE ● {}s]", seconds),
+                        Style::default()
+                            .fg(Color::Green)
+                            .add_modifier(Modifier::BOLD),
+                    )
+                }
+                WebSocketStatus::Connecting => {
+                    Span::styled(
+                        " [CONNECTING...]",
+                        Style::default()
+                            .fg(Color::Yellow)
+                            .add_modifier(Modifier::BOLD),
+                    )
+                }
+                WebSocketStatus::Reconnecting { attempt, next_retry_in } => {
+                    let secs = next_retry_in.as_secs();
+                    Span::styled(
+                        format!(" [RECONNECTING {}/5 ({}s)]", attempt, secs),
+                        Style::default()
+                            .fg(Color::Yellow)
+                            .add_modifier(Modifier::BOLD),
+                    )
+                }
+                WebSocketStatus::Error { message, recoverable } => {
+                    let display_msg = if message.len() > 20 {
+                        format!("{}...", &message[..17])
+                    } else {
+                        message.clone()
+                    };
+                    let color = if *recoverable { Color::Yellow } else { Color::Red };
+                    Span::styled(
+                        format!(" [ERROR: {}]", display_msg),
+                        Style::default().fg(color).add_modifier(Modifier::BOLD),
+                    )
+                }
+                WebSocketStatus::Disconnected => {
+                    Span::styled(
+                        " [DISCONNECTED]",
+                        Style::default().fg(Color::Gray),
+                    )
+                }
+                WebSocketStatus::Idle => {
+                    Span::styled(
+                        " [PAUSED]",
+                        Style::default().fg(Color::Gray),
+                    )
+                }
+            }
         } else {
             Span::styled(
                 " [PAUSED]",
@@ -378,12 +496,14 @@ fn render_chart(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
             .timestamps
             .first()
             .unwrap()
+            .with_timezone(&Local)
             .format("%m/%d %H:%M")
             .to_string();
         let last_date = stock_data
             .timestamps
             .last()
             .unwrap()
+            .with_timezone(&Local)
             .format("%m/%d %H:%M")
             .to_string();
 
@@ -437,10 +557,53 @@ fn render_chart(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
 fn render_footer(f: &mut Frame, _app: &App, area: ratatui::layout::Rect) {
 	    let footer_text = vec![
         Line::from("Controls:"),
-        Line::from("'b': Back | 's': Symbol | '←/→': Timeframe | 'l': Live | 'r': Refresh | 'q': Quit"),
+        Line::from("'b': Back | 's': Symbol | '←/→': Timeframe | 'l': Live | 'r': Refresh | 'e': Errors | 'q': Quit"),
     ];
 
     let footer = Paragraph::new(footer_text)
         .block(Block::default().borders(Borders::ALL).title("Controls"));
     f.render_widget(footer, area);
+}
+
+fn render_error_log(f: &mut Frame, app: &App) {
+    // Create centered popup area
+    let area = f.area();
+    let popup_width = area.width.min(60);
+    let popup_height = area.height.min(15);
+    let popup_x = (area.width.saturating_sub(popup_width)) / 2;
+    let popup_y = (area.height.saturating_sub(popup_height)) / 2;
+
+    let popup_area = ratatui::layout::Rect {
+        x: popup_x,
+        y: popup_y,
+        width: popup_width,
+        height: popup_height,
+    };
+
+    // Render error log content
+    let error_items: Vec<ListItem> = if app.ws_error_log.is_empty() {
+        vec![ListItem::new(Line::from(Span::styled(
+            "No errors logged yet",
+            Style::default().fg(Color::Gray),
+        )))]
+    } else {
+        app.ws_error_log
+            .iter()
+            .map(|error| {
+                ListItem::new(Line::from(Span::styled(
+                    error.clone(),
+                    Style::default().fg(Color::Red),
+                )))
+            })
+            .collect()
+    };
+
+    let error_list = List::new(error_items).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title("WebSocket Error Log (ESC to close)")
+            .style(Style::default().bg(Color::Black)),
+    );
+
+    f.render_widget(error_list, popup_area);
 }

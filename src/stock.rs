@@ -1,4 +1,11 @@
 use chrono::{DateTime, Utc};
+use std::collections::VecDeque;
+
+#[derive(Debug, Clone)]
+pub struct LiveTick {
+    pub price: f64,
+    pub timestamp: DateTime<Utc>,
+}
 
 #[derive(Debug, Clone)]
 pub struct StockData {
@@ -8,6 +15,9 @@ pub struct StockData {
     pub current_price: f64,
     pub change: f64,
     pub change_percent: f64,
+    pub live_ticks: VecDeque<LiveTick>,
+    pub live_current_price: Option<f64>,
+    pub base_historical_price: f64,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -113,5 +123,8 @@ pub fn fetch_stock_data(symbol: &str, timeframe: TimeFrame) -> Result<StockData,
         current_price,
         change,
         change_percent,
+        live_ticks: VecDeque::new(),
+        live_current_price: None,
+        base_historical_price: current_price,
     })
 }
