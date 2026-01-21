@@ -18,6 +18,7 @@ pub struct LivePrice {
     pub symbol: String,
     pub price: f64,
     pub timestamp: i64,
+    pub volume: Option<u64>,
 }
 
 #[derive(Debug)]
@@ -297,10 +298,12 @@ impl WebSocketManager {
                                                 trade["p"].as_f64(),
                                                 trade["t"].as_i64(),
                                             ) {
+                                                let volume = trade["v"].as_u64();
                                                 let live_price = LivePrice {
                                                     symbol: symbol.clone(),
                                                     price,
                                                     timestamp: ts / 1000,
+                                                    volume,
                                                 };
 
                                                 if tx.send(live_price).is_err() {

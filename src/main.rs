@@ -18,11 +18,6 @@ use websocket::LivePrice;
 use std::fs::OpenOptions;
 use std::io::Write;
 
-fn should_auto_start_live_mode(symbol: &str) -> bool {
-    // Don't auto-start for indices (starts with ^)
-    !symbol.starts_with('^')
-}
-
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
@@ -86,7 +81,7 @@ async fn run_app(
         // Check for live price updates with throttling
         if let Ok(live_price) = rx.try_recv() {
             if app.live_updates_enabled && app.update_throttle.should_update() {
-                app.update_live_price(live_price.price);
+                app.update_live_price(live_price.price, live_price.volume);
             }
         }
 
@@ -135,22 +130,6 @@ async fn handle_input(
                             // Stop existing WebSocket and fetch new data
                             stop_websocket(ws_task_handle, &app.ws_should_stop).await;
                             app.fetch_data();
-
-                            // Auto-start live mode if appropriate
-                            if should_auto_start_live_mode(&app.symbol) {
-                                app.live_updates_enabled = true;
-                                *app.ws_should_stop.lock().await = false;
-
-                                let symbol_clone = app.symbol.clone();
-                                let base_price = app.get_base_price();
-                                let tx_clone = tx.clone();
-                                let status_tx_clone = status_tx.clone();
-                                let should_stop = app.ws_should_stop.clone();
-
-                                *ws_task_handle = Some(tokio::spawn(async move {
-                                    websocket::start_websocket(symbol_clone, base_price, tx_clone, status_tx_clone, should_stop).await;
-                                }));
-                            }
                         }
                     }
                     KeyCode::Esc => {
@@ -178,26 +157,9 @@ async fn handle_input(
                         app.next_popular();
                     }
                     KeyCode::Enter => {
-                        // Stop existing WebSocket
+                        // Stop existing WebSocket and fetch data
                         stop_websocket(ws_task_handle, &app.ws_should_stop).await;
-
                         app.select_popular();
-
-                        // Auto-start live mode if appropriate
-                        if should_auto_start_live_mode(&app.symbol) {
-                            app.live_updates_enabled = true;
-                            *app.ws_should_stop.lock().await = false;
-
-                            let symbol_clone = app.symbol.clone();
-                            let base_price = app.get_base_price();
-                            let tx_clone = tx.clone();
-                            let status_tx_clone = status_tx.clone();
-                            let should_stop = app.ws_should_stop.clone();
-
-                            *ws_task_handle = Some(tokio::spawn(async move {
-                                websocket::start_websocket(symbol_clone, base_price, tx_clone, status_tx_clone, should_stop).await;
-                            }));
-                        }
                     }
                     _ => {}
                 }
@@ -205,11 +167,61 @@ async fn handle_input(
             false
         }
         AppState::Chart => {
-            // Handle error log popup first
+            // Handle popups first
             if app.show_error_log {
                 match key {
                     KeyCode::Esc => {
                         app.show_error_log = false;
+                        return false;
+                    }
+                    _ => return false,
+                }
+            }
+
+            if app.show_live_mode_select {
+                match key {
+                    KeyCode::Char('1') => {
+                        // Live Ticker mode
+                        app.show_live_mode_select = false;
+                        app.clear_live_data();
+                        app.live_updates_enabled = true;
+                        app.state = AppState::LiveTicker;
+
+                        // Start WebSocket
+                        stop_websocket(ws_task_handle, &app.ws_should_stop).await;
+                        *app.ws_should_stop.lock().await = false;
+                        let symbol_clone = app.symbol.clone();
+                        let base_price = app.get_base_price();
+                        let tx_clone = tx.clone();
+                        let status_tx_clone = status_tx.clone();
+                        let should_stop = app.ws_should_stop.clone();
+                        *ws_task_handle = Some(tokio::spawn(async move {
+                            websocket::start_websocket(symbol_clone, base_price, tx_clone, status_tx_clone, should_stop).await;
+                        }));
+                        return false;
+                    }
+                    KeyCode::Char('2') => {
+                        // Live Candles mode
+                        app.show_live_mode_select = false;
+                        app.clear_live_data();
+                        app.live_updates_enabled = true;
+                        app.state = AppState::LiveCandles;
+
+                        // Start WebSocket
+                        stop_websocket(ws_task_handle, &app.ws_should_stop).await;
+                        *app.ws_should_stop.lock().await = false;
+                        let symbol_clone = app.symbol.clone();
+                        let base_price = app.get_base_price();
+                        let tx_clone = tx.clone();
+                        let status_tx_clone = status_tx.clone();
+                        let should_stop = app.ws_should_stop.clone();
+                        *ws_task_handle = Some(tokio::spawn(async move {
+                            websocket::start_websocket(symbol_clone, base_price, tx_clone, status_tx_clone, should_stop).await;
+                        }));
+                        return false;
+                    }
+                    KeyCode::Esc => {
+                        app.show_live_mode_select = false;
                         return false;
                     }
                     _ => return false,
@@ -223,8 +235,6 @@ async fn handle_input(
                     app.stock_data = None;
                     app.error_message = None;
                     app.live_updates_enabled = false;
-
-                    // Stop WebSocket when going back
                     stop_websocket(ws_task_handle, &app.ws_should_stop).await;
                     false
                 }
@@ -238,109 +248,82 @@ async fn handle_input(
                     false
                 }
                 KeyCode::Char('l') => {
-                    app.live_updates_enabled = !app.live_updates_enabled;
-
-                    // Start WebSocket if enabling live mode
-                    if app.live_updates_enabled {
-                        stop_websocket(ws_task_handle, &app.ws_should_stop).await;
-                        *app.ws_should_stop.lock().await = false;
-
-                        let symbol_clone = app.symbol.clone();
-                        let base_price = app.get_base_price();
-                        let tx_clone = tx.clone();
-                        let status_tx_clone = status_tx.clone();
-                        let should_stop = app.ws_should_stop.clone();
-
-                        *ws_task_handle = Some(tokio::spawn(async move {
-                            websocket::start_websocket(symbol_clone, base_price, tx_clone, status_tx_clone, should_stop).await;
-                        }));
-                    } else {
-                        stop_websocket(ws_task_handle, &app.ws_should_stop).await;
-                        app.ws_status = WebSocketStatus::Idle;
-                    }
+                    // Show live mode selection popup
+                    app.show_live_mode_select = true;
                     false
                 }
                 KeyCode::Char('r') => {
-                    let was_live = app.live_updates_enabled;
-
-                    // Stop WebSocket, clear live data, and refresh historical
-                    stop_websocket(ws_task_handle, &app.ws_should_stop).await;
-                    if let Some(ref mut data) = app.stock_data {
-                        data.live_ticks.clear();
-                        data.live_current_price = None;
-                    }
                     app.fetch_data();
-
-                    // Restart WebSocket if live mode was enabled
-                    if was_live {
-                        *app.ws_should_stop.lock().await = false;
-
-                        let symbol_clone = app.symbol.clone();
-                        let base_price = app.get_base_price();
-                        let tx_clone = tx.clone();
-                        let status_tx_clone = status_tx.clone();
-                        let should_stop = app.ws_should_stop.clone();
-
-                        *ws_task_handle = Some(tokio::spawn(async move {
-                            websocket::start_websocket(symbol_clone, base_price, tx_clone, status_tx_clone, should_stop).await;
-                        }));
-                    }
                     false
                 }
                 KeyCode::Left => {
-                    let was_live = app.live_updates_enabled;
-
-                    // Stop WebSocket and change timeframe
-                    stop_websocket(ws_task_handle, &app.ws_should_stop).await;
-                    if let Some(ref mut data) = app.stock_data {
-                        data.live_ticks.clear();
-                        data.live_current_price = None;
-                    }
                     app.timeframe = app.timeframe.prev();
                     app.fetch_data();
-
-                    // Restart WebSocket if live mode was enabled
-                    if was_live {
-                        *app.ws_should_stop.lock().await = false;
-
-                        let symbol_clone = app.symbol.clone();
-                        let base_price = app.get_base_price();
-                        let tx_clone = tx.clone();
-                        let status_tx_clone = status_tx.clone();
-                        let should_stop = app.ws_should_stop.clone();
-
-                        *ws_task_handle = Some(tokio::spawn(async move {
-                            websocket::start_websocket(symbol_clone, base_price, tx_clone, status_tx_clone, should_stop).await;
-                        }));
-                    }
                     false
                 }
                 KeyCode::Right => {
-                    let was_live = app.live_updates_enabled;
-
-                    // Stop WebSocket and change timeframe
-                    stop_websocket(ws_task_handle, &app.ws_should_stop).await;
-                    if let Some(ref mut data) = app.stock_data {
-                        data.live_ticks.clear();
-                        data.live_current_price = None;
-                    }
                     app.timeframe = app.timeframe.next();
                     app.fetch_data();
-
-                    // Restart WebSocket if live mode was enabled
-                    if was_live {
-                        *app.ws_should_stop.lock().await = false;
-
-                        let symbol_clone = app.symbol.clone();
-                        let base_price = app.get_base_price();
-                        let tx_clone = tx.clone();
-                        let status_tx_clone = status_tx.clone();
-                        let should_stop = app.ws_should_stop.clone();
-
-                        *ws_task_handle = Some(tokio::spawn(async move {
-                            websocket::start_websocket(symbol_clone, base_price, tx_clone, status_tx_clone, should_stop).await;
-                        }));
+                    false
+                }
+                _ => false,
+            }
+        },
+        AppState::LiveTicker | AppState::LiveCandles => {
+            // Handle popups first
+            if app.show_error_log {
+                match key {
+                    KeyCode::Esc => {
+                        app.show_error_log = false;
+                        return false;
                     }
+                    _ => return false,
+                }
+            }
+
+            if app.show_live_mode_select {
+                match key {
+                    KeyCode::Char('1') => {
+                        app.show_live_mode_select = false;
+                        if !matches!(app.state, AppState::LiveTicker) {
+                            app.clear_live_data();
+                            app.state = AppState::LiveTicker;
+                        }
+                        return false;
+                    }
+                    KeyCode::Char('2') => {
+                        app.show_live_mode_select = false;
+                        if !matches!(app.state, AppState::LiveCandles) {
+                            app.clear_live_data();
+                            app.state = AppState::LiveCandles;
+                        }
+                        return false;
+                    }
+                    KeyCode::Esc => {
+                        app.show_live_mode_select = false;
+                        return false;
+                    }
+                    _ => return false,
+                }
+            }
+
+            match key {
+                KeyCode::Char('q') => true,
+                KeyCode::Char('h') => {
+                    // Go back to historical chart
+                    app.live_updates_enabled = false;
+                    app.state = AppState::Chart;
+                    stop_websocket(ws_task_handle, &app.ws_should_stop).await;
+                    app.ws_status = WebSocketStatus::Idle;
+                    false
+                }
+                KeyCode::Char('l') => {
+                    // Show live mode selection to switch
+                    app.show_live_mode_select = true;
+                    false
+                }
+                KeyCode::Char('e') => {
+                    app.show_error_log = !app.show_error_log;
                     false
                 }
                 _ => false,
