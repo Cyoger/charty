@@ -2,6 +2,21 @@
 name = "charty"
 version = "0.1.0"
 edition = "2024"
+description = "Terminal-based stock market charting and analysis"
+authors = ["cyoger"]
+license = "MIT"
+repository = "https://github.com/cyoger/charty"
+readme = "README.md"
+keywords = ["stocks", "tui", "terminal", "finance", "charts"]
+categories = ["command-line-utilities", "visualization"]
+
+[package.metadata.deb]
+maintainer = "cyoger"
+section = "utility"
+priority = "optional"
+assets = [
+    ["target/release/charty", "usr/bin/", "755"],
+]
 
 [dependencies]
 ratatui = "0.28"

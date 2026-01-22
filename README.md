@@ -88,30 +88,6 @@ charty/
 └── .env
 ```
 
-## Releases
-
-Pre-built binaries are available on the [Releases](../../releases) page for:
-- Linux (x86_64)
-- macOS (x86_64, Apple Silicon)
-- Windows (x86_64)
-
-### Creating a Release
-
-Releases are automated via GitHub Actions. To create a new release:
-
-```bash
-# Tag the commit with a version
-git tag v1.0.0
-
-# Push the tag to trigger the release workflow
-git push origin v1.0.0
-```
-
-The workflow will automatically:
-1. Build binaries for all supported platforms
-2. Create a GitHub release with auto-generated release notes
-3. Attach the compiled binaries
-
 ## License
 
 MIT
