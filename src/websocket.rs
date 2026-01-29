@@ -134,9 +134,9 @@ impl WebSocketManager {
             // Send connecting status
             *self.status.lock().await = ConnectionStatus::Connecting;
             let _ = status_tx.send(WebSocketStatus::Connecting);
+            let trimmed_key = api_key.trim();
+            let url = format!("wss://ws.finnhub.io/?token={}", trimmed_key);
             log_to_file(&format!("WebSocket connecting to Finnhub for {}", symbol));
-
-            let url = format!("wss://ws.finnhub.io?token={}", api_key);
 
             match connect_async(&url).await {
                 Ok((ws_stream, _)) => {
@@ -347,9 +347,11 @@ pub async fn start_websocket(
     status_tx: mpsc::UnboundedSender<WebSocketStatus>,
     should_stop: Arc<Mutex<bool>>,
 ) {
-    let api_key = std::env::var("FINNHUB_API_KEY").ok();
+    let api_key = std::env::var("FINNHUB_API_KEY")
+        .ok()
+        .map(|k| k.trim().trim_matches('"').trim_matches('\'').to_string());
 
-    if api_key.is_none() {
+    if api_key.is_none() || api_key.as_ref().map(|k| k.is_empty()).unwrap_or(true) {
         let _ = status_tx.send(WebSocketStatus::Error {
             message: "No API key configured. Set FINNHUB_API_KEY environment variable.".to_string(),
             recoverable: false,
