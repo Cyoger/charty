@@ -2,6 +2,7 @@ use chrono::{DateTime, Utc};
 use std::collections::VecDeque;
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct LiveTick {
     pub price: f64,
     pub timestamp: DateTime<Utc>,

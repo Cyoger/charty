@@ -13,6 +13,7 @@ const MAX_RECONNECT_ATTEMPTS: u32 = 5;
 const BASE_DELAY_SECS: u64 = 2;
 const MAX_DELAY_SECS: u64 = 32;
 
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct LivePrice {
     pub symbol: String,
