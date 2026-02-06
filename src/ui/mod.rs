@@ -1,3 +1,4 @@
+use ratatui::widgets::ListItem;
 use ratatui::{
     widgets::ListState,
     Frame,
@@ -10,6 +11,9 @@ use std::time::Duration;
 use std::collections::VecDeque;
 use tokio::sync::Mutex;
 use chrono::{DateTime, Utc};
+use ratatui::text::{Line, Span};
+use ratatui::style::{Style, Color, Modifier};
+use ratatui::widgets::{Block, Borders, List, Clear};
 
 mod landing;
 use landing::render_landing;
@@ -62,6 +66,67 @@ pub enum AppState {
     LiveCandles,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub enum CandleInterval {
+    OneMinute,
+    FiveMinutes,
+    FifteenMinutes,
+    ThirtyMinutes,
+    OneHour,
+}
+
+impl CandleInterval {
+    pub fn to_secs(&self) -> u64 {
+        match self {
+            CandleInterval::OneMinute => 60,
+            CandleInterval::FiveMinutes => 300,
+            CandleInterval::FifteenMinutes => 900,
+            CandleInterval::ThirtyMinutes => 1800,
+            CandleInterval::OneHour => 3600,
+        }
+    }
+
+    pub fn to_string(&self) -> &'static str {
+        match self {
+            CandleInterval::OneMinute => "1m",
+            CandleInterval::FiveMinutes => "5m",
+            CandleInterval::FifteenMinutes => "15m",
+            CandleInterval::ThirtyMinutes => "30m",
+            CandleInterval::OneHour => "1h",
+        }
+    }
+
+    pub fn to_finnhub_resolution(&self) -> &'static str {
+        match self {
+            CandleInterval::OneMinute => "1",
+            CandleInterval::FiveMinutes => "5",
+            CandleInterval::FifteenMinutes => "15",
+            CandleInterval::ThirtyMinutes => "30",
+            CandleInterval::OneHour => "60",
+        }
+    }
+
+    pub fn prev(&self) -> Self {
+        match self {
+            CandleInterval::OneMinute => CandleInterval::OneHour,
+            CandleInterval::FiveMinutes => CandleInterval::OneMinute,
+            CandleInterval::FifteenMinutes => CandleInterval::FiveMinutes,
+            CandleInterval::ThirtyMinutes => CandleInterval::FifteenMinutes,
+            CandleInterval::OneHour => CandleInterval::ThirtyMinutes,
+        }
+    }
+
+    pub fn next(&self) -> Self {
+        match self {
+            CandleInterval::OneMinute => CandleInterval::FiveMinutes,
+            CandleInterval::FiveMinutes => CandleInterval::FifteenMinutes,
+            CandleInterval::FifteenMinutes => CandleInterval::ThirtyMinutes,
+            CandleInterval::ThirtyMinutes => CandleInterval::OneHour,
+            CandleInterval::OneHour => CandleInterval::OneMinute,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Trade {
     pub price: f64,
@@ -99,14 +164,16 @@ pub struct App {
     pub ws_error_log: VecDeque<String>,
     pub update_throttle: UpdateThrottle,
     pub show_error_log: bool,
+    pub show_candlesticks: bool,
     // Live mode fields
     pub show_live_mode_select: bool,
     pub live_trades: VecDeque<Trade>,
     pub live_candles: VecDeque<Candlestick>,
     pub current_candle: Option<Candlestick>,
-    pub candle_interval_secs: u64,
+    pub candle_interval: CandleInterval,
     pub total_live_volume: u64,
     pub total_trade_count: u32,
+    pub show_help: bool,
 }
 
 impl App {
@@ -146,14 +213,16 @@ impl App {
             ws_error_log: VecDeque::new(),
             update_throttle: UpdateThrottle::new(Duration::from_millis(100)), // Faster for live modes
             show_error_log: false,
+            show_candlesticks: false,
             // Live mode fields
             show_live_mode_select: false,
             live_trades: VecDeque::new(),
             live_candles: VecDeque::new(),
             current_candle: None,
-            candle_interval_secs: 60, // 1 minute candles
+            candle_interval: CandleInterval::OneMinute,
             total_live_volume: 0,
             total_trade_count: 0,
+            show_help: false,
         }
     }
 
@@ -166,7 +235,15 @@ impl App {
                 self.state = AppState::Chart;
             }
             Err(e) => {
-                self.error_message = Some(format!("Error fetching {}: {}", self.symbol, e));
+                // Log full error for debugging
+                let full_error = format!("Error fetching {}: {}", self.symbol, e);
+                self.add_error_to_log(full_error);
+
+                // Show clean user-friendly message
+                self.error_message = Some(format!(
+                    "Could not load data for {}\n\nCheck symbol or try again later\n\nPress 'e' to view error log",
+                    self.symbol
+                ));
                 self.state = AppState::Chart;
             }
         }
@@ -216,7 +293,7 @@ impl App {
     }
 
     fn aggregate_into_candle(&mut self, price: f64, volume: u64, timestamp: DateTime<Utc>) {
-        let interval_secs = self.candle_interval_secs as i64;
+        let interval_secs = self.candle_interval.to_secs() as i64;
         let candle_start = timestamp.timestamp() / interval_secs * interval_secs;
 
         match &mut self.current_candle {
@@ -330,6 +407,150 @@ impl App {
             self.fetch_data();
         }
     }
+
+    pub fn load_historical_candles(&mut self) {
+        // Fetch historical candles from Finnhub
+        let resolution = self.candle_interval.to_finnhub_resolution();
+        match crate::stock::fetch_historical_candles(&self.symbol, resolution, 60) {
+            Ok(candles) => {
+                // Clear existing and load historical candles
+                self.live_candles.clear();
+                for candle in candles {
+                    self.live_candles.push_back(candle);
+                }
+            }
+            Err(e) => {
+                // Log error but don't fail - can still show live candles
+                self.add_error_to_log(format!("Could not load historical candles: {}", e));
+            }
+        }
+    }
+
+    pub fn convert_to_candlesticks(&self) -> Vec<Candlestick> {
+        // Convert historical price data to candlesticks
+        if let Some(ref data) = self.stock_data {
+            let interval_secs = self.candle_interval.to_secs() as i64;
+            let mut candles = Vec::new();
+            let mut current_bucket: Vec<(DateTime<Utc>, f64)> = Vec::new();
+            let mut current_bucket_start = 0i64;
+
+            for (ts, price) in data.timestamps.iter().zip(data.prices.iter()) {
+                let bucket_start = ts.timestamp() / interval_secs * interval_secs;
+
+                if current_bucket.is_empty() {
+                    current_bucket_start = bucket_start;
+                }
+
+                if bucket_start == current_bucket_start {
+                    current_bucket.push((*ts, *price));
+                } else {
+                    // Finalize current bucket
+                    if !current_bucket.is_empty() {
+                        let open = current_bucket.first().unwrap().1;
+                        let close = current_bucket.last().unwrap().1;
+                        let high = current_bucket.iter().map(|(_, p)| p).fold(f64::NEG_INFINITY, |a, &b| a.max(b));
+                        let low = current_bucket.iter().map(|(_, p)| p).fold(f64::INFINITY, |a, &b| a.min(b));
+
+                        candles.push(Candlestick {
+                            open,
+                            high,
+                            low,
+                            close,
+                            volume: 0, // Not available from price data
+                            timestamp: current_bucket.first().unwrap().0,
+                            trade_count: current_bucket.len() as u32,
+                        });
+                    }
+
+                    // Start new bucket
+                    current_bucket.clear();
+                    current_bucket.push((*ts, *price));
+                    current_bucket_start = bucket_start;
+                }
+            }
+
+            // Finalize last bucket
+            if !current_bucket.is_empty() {
+                let open = current_bucket.first().unwrap().1;
+                let close = current_bucket.last().unwrap().1;
+                let high = current_bucket.iter().map(|(_, p)| p).fold(f64::NEG_INFINITY, |a, &b| a.max(b));
+                let low = current_bucket.iter().map(|(_, p)| p).fold(f64::INFINITY, |a, &b| a.min(b));
+
+                candles.push(Candlestick {
+                    open,
+                    high,
+                    low,
+                    close,
+                    volume: 0,
+                    timestamp: current_bucket.first().unwrap().0,
+                    trade_count: current_bucket.len() as u32,
+                });
+            }
+
+            candles
+        } else {
+            Vec::new()
+        }
+    }
+}
+
+pub fn render_help(f: &mut Frame, _app: &App){
+    let area = f.area();
+
+    let popup_width = area.width.min(60);
+    let popup_height = area.height.min(15);
+    let popup_x = (area.width.saturating_sub(popup_width)) / 2;
+    let popup_y = (area.height.saturating_sub(popup_height)) / 2;
+
+    let popup_area = ratatui::layout::Rect {
+        x: popup_x,
+        y: popup_y,
+        width: popup_width,
+        height: popup_height,
+    };
+
+    let help_items = vec![
+        ("↑/↓", "Navigate list"),
+        ("Enter", "Select stock"),
+        ("s", "Search for stock"),
+        ("←/→", "Change timeframe / candle interval"),
+        ("l", "Enter live mode"),
+        ("b", "Back to chart / landing"),
+        ("e", "Show error log"),
+        ("h", "Toggle this help screen"),
+        ("Esc", "Cancel/close popup"),
+        ("q", "Quit application"),
+    ];
+
+    let list_items: Vec<ListItem> = help_items
+        .iter()
+        .map(|(key, desc)| {
+            ListItem::new(Line::from(vec![
+                Span::styled(
+                    format!("{:12}", key),  // Left-aligned key with padding
+                    Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+                ),
+                Span::styled(
+                    desc.to_string(),
+                    Style::default().fg(Color::White)
+                ),
+            ]))
+        })
+        .collect();
+
+    let help_list = List::new(list_items)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title("Help (Press 'h' to close)")
+                .style(Style::default().bg(Color::Black))
+        );
+
+    // Clear background to make popup solid
+    f.render_widget(Clear, popup_area);
+    f.render_widget(help_list, popup_area);
+
+
 }
 
 pub fn ui(f: &mut Frame, app: &App) {
@@ -346,5 +567,8 @@ pub fn ui(f: &mut Frame, app: &App) {
     }
     if app.show_error_log {
         render_error_log(f, app);
+    }
+    if app.show_help {
+        render_help(f, app);
     }
 }

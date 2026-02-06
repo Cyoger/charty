@@ -129,3 +129,86 @@ pub fn fetch_stock_data(symbol: &str, timeframe: TimeFrame) -> Result<StockData,
         base_historical_price: current_price,
     })
 }
+
+fn yahoo_to_finnhub_symbol(yahoo_symbol: &str) -> &str {
+    // Map Yahoo Finance symbols to Finnhub symbols
+    match yahoo_symbol {
+        "^GSPC" => "SPX",      // S&P 500
+        "^DJI" => "DJI",       // Dow Jones
+        "^IXIC" => "IXIC",     // Nasdaq
+        "^VIX" => "VIX",       // Volatility Index
+        "BTC-USD" => "BINANCE:BTCUSDT",  // Bitcoin
+        "ETH-USD" => "BINANCE:ETHUSDT",  // Ethereum
+        _ => yahoo_symbol,     // Use as-is for stocks
+    }
+}
+
+pub fn fetch_historical_candles(
+    symbol: &str,
+    resolution: &str,
+    count: usize,
+) -> Result<Vec<crate::ui::Candlestick>, Box<dyn std::error::Error>> {
+    use crate::ui::Candlestick;
+
+    let api_key = std::env::var("FINNHUB_API_KEY")
+        .map_err(|_| "FINNHUB_API_KEY not set")?;
+
+    // Convert Yahoo symbol to Finnhub symbol
+    let finnhub_symbol = yahoo_to_finnhub_symbol(symbol);
+
+    let now = Utc::now().timestamp();
+    let seconds_per_candle = match resolution {
+        "1" => 60,
+        "5" => 300,
+        "15" => 900,
+        "30" => 1800,
+        "60" => 3600,
+        _ => 60,
+    };
+    let from = now - (seconds_per_candle * count as i64);
+
+    let url = format!(
+        "https://finnhub.io/api/v1/stock/candle?symbol={}&resolution={}&from={}&to={}&token={}",
+        finnhub_symbol, resolution, from, now, api_key.trim()
+    );
+
+    let response = ureq::get(&url).call()?;
+    let json: serde_json::Value = response.into_json()?;
+
+    // Check if we got valid data
+    if json["s"].as_str() != Some("ok") {
+        return Err("No candle data available".into());
+    }
+
+    let opens = json["o"].as_array().ok_or("No open data")?;
+    let highs = json["h"].as_array().ok_or("No high data")?;
+    let lows = json["l"].as_array().ok_or("No low data")?;
+    let closes = json["c"].as_array().ok_or("No close data")?;
+    let volumes = json["v"].as_array().ok_or("No volume data")?;
+    let timestamps = json["t"].as_array().ok_or("No timestamp data")?;
+
+    let mut candles = Vec::new();
+
+    for i in 0..opens.len() {
+        if let (Some(o), Some(h), Some(l), Some(c), Some(v), Some(t)) = (
+            opens[i].as_f64(),
+            highs[i].as_f64(),
+            lows[i].as_f64(),
+            closes[i].as_f64(),
+            volumes[i].as_f64(),
+            timestamps[i].as_i64(),
+        ) {
+            candles.push(Candlestick {
+                open: o,
+                high: h,
+                low: l,
+                close: c,
+                volume: v as u64,
+                timestamp: DateTime::from_timestamp(t, 0).unwrap_or_else(Utc::now),
+                trade_count: 0, // Not provided by Finnhub API
+            });
+        }
+    }
+
+    Ok(candles)
+}

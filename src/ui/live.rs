@@ -87,7 +87,8 @@ pub fn render_live_candles(f: &mut Frame, app: &App) {
         .split(f.area());
 
     // Header with current price
-    render_live_header(f, app, chunks[0], "LIVE CANDLES (1min)");
+    let header_title = format!("LIVE CANDLES ({})", app.candle_interval.to_string());
+    render_live_header(f, app, chunks[0], &header_title);
 
     // Candlestick chart area
     let chart_area = chunks[1];
@@ -171,7 +172,7 @@ fn render_live_header(f: &mut Frame, app: &App, area: ratatui::layout::Rect, mod
 }
 
 fn render_live_footer(f: &mut Frame, area: ratatui::layout::Rect) {
-    let footer = Paragraph::new("'l': Switch Mode | 'h': Historical | 'e': Errors | 'q': Quit")
+    let footer = Paragraph::new("'b': Back | 'l': Switch | 'h': Help | 'e': Errors | 'q': Quit")
         .alignment(Alignment::Center)
         .block(Block::default().borders(Borders::ALL).title("Controls"));
     f.render_widget(footer, area);
@@ -242,7 +243,7 @@ fn render_candle_footer(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
     let footer_text = vec![
         ohlc_line,
         Line::from(""),
-        Line::from("'l': Switch Mode | 'h': Historical | 'e': Errors | 'q': Quit"),
+        Line::from("'←/→': Interval | 'b': Back | 'l': Switch | 'h': Help | 'e': Errors | 'q': Quit"),
     ];
 
     let footer = Paragraph::new(footer_text)

@@ -79,7 +79,13 @@ async fn run_app(
         }
 
         // Check for live price updates with throttling
-        if let Ok(live_price) = rx.try_recv() {
+        // Drain all pending messages to prevent unbounded queueing
+        let mut latest_price = None;
+        while let Ok(live_price) = rx.try_recv() {
+            latest_price = Some(live_price);
+        }
+
+        if let Some(live_price) = latest_price {
             if app.live_updates_enabled && app.update_throttle.should_update() {
                 app.update_live_price(live_price.price, live_price.volume);
             }
@@ -118,6 +124,17 @@ async fn handle_input(
 ) -> bool {
     match app.state {
         AppState::Landing => {
+            // Handle help popup first
+            if app.show_help {
+                match key {
+                    KeyCode::Char('h') | KeyCode::Esc => {
+                        app.show_help = false;
+                        return false;
+                    }
+                    _ => return false,
+                }
+            }
+
             if app.input_mode {
                 match key {
                     KeyCode::Char('q') if app.input_buffer.is_empty() => return true,
@@ -161,6 +178,9 @@ async fn handle_input(
                         stop_websocket(ws_task_handle, &app.ws_should_stop).await;
                         app.select_popular();
                     }
+                    KeyCode::Char('h') => {
+                        app.show_help = !app.show_help;
+                    }
                     _ => {}
                 }
             }
@@ -172,6 +192,16 @@ async fn handle_input(
                 match key {
                     KeyCode::Esc => {
                         app.show_error_log = false;
+                        return false;
+                    }
+                    _ => return false,
+                }
+            }
+
+            if app.show_help {
+                match key { 
+                    KeyCode::Char('h') | KeyCode::Esc => {
+                        app.show_help = false;
                         return false;
                     }
                     _ => return false,
@@ -204,6 +234,7 @@ async fn handle_input(
                         // Live Candles mode
                         app.show_live_mode_select = false;
                         app.clear_live_data();
+                        app.load_historical_candles(); // Load historical candles first
                         app.live_updates_enabled = true;
                         app.state = AppState::LiveCandles;
 
@@ -252,25 +283,58 @@ async fn handle_input(
                     app.show_live_mode_select = true;
                     false
                 }
+                KeyCode::Char('h') => {
+                    app.show_help = !app.show_help;
+                    false
+                }
+                // Candlestick toggle disabled for now
+                // KeyCode::Char('c') => {
+                //     app.show_candlesticks = !app.show_candlesticks;
+                //     false
+                // }
                 KeyCode::Char('r') => {
                     app.fetch_data();
                     false
                 }
                 KeyCode::Left => {
-                    app.timeframe = app.timeframe.prev();
-                    app.fetch_data();
-                    false
+                    if app.show_candlesticks {
+                        // Change candle interval in candlestick mode
+                        app.candle_interval = app.candle_interval.prev();
+                        false
+                    } else {
+                        // Change timeframe in regular chart mode
+                        app.timeframe = app.timeframe.prev();
+                        app.fetch_data();
+                        false
+                    }
                 }
                 KeyCode::Right => {
-                    app.timeframe = app.timeframe.next();
-                    app.fetch_data();
-                    false
+                    if app.show_candlesticks {
+                        // Change candle interval in candlestick mode
+                        app.candle_interval = app.candle_interval.next();
+                        false
+                    } else {
+                        // Change timeframe in regular chart mode
+                        app.timeframe = app.timeframe.next();
+                        app.fetch_data();
+                        false
+                    }
                 }
                 _ => false,
             }
         },
         AppState::LiveTicker | AppState::LiveCandles => {
             // Handle popups first
+            if app.show_help {
+                match key {
+                    KeyCode::Char('h') | KeyCode::Esc => {
+                        app.show_help = false;
+                        return false;
+                    }
+                    _ => return false,
+                }
+            }
+
             if app.show_error_log {
                 match key {
                     KeyCode::Esc => {
@@ -309,12 +373,16 @@ async fn handle_input(
 
             match key {
                 KeyCode::Char('q') => true,
-                KeyCode::Char('h') => {
+                KeyCode::Char('b') => {
                     // Go back to historical chart
                     app.live_updates_enabled = false;
                     app.state = AppState::Chart;
                     stop_websocket(ws_task_handle, &app.ws_should_stop).await;
                     app.ws_status = WebSocketStatus::Idle;
+                    false
+                }
+                KeyCode::Char('h') => {
+                    app.show_help = !app.show_help;
                     false
                 }
                 KeyCode::Char('l') => {
@@ -324,6 +392,24 @@ async fn handle_input(
                 }
                 KeyCode::Char('e') => {
                     app.show_error_log = !app.show_error_log;
+                    false
+                }
+                KeyCode::Left => {
+                    // Only change interval in LiveCandles mode
+                    if matches!(app.state, AppState::LiveCandles) {
+                        app.candle_interval = app.candle_interval.prev();
+                        app.clear_live_data();
+                        app.load_historical_candles();
+                    }
+                    false
+                }
+                KeyCode::Right => {
+                    // Only change interval in LiveCandles mode
+                    if matches!(app.state, AppState::LiveCandles) {
+                        app.candle_interval = app.candle_interval.next();
+                        app.clear_live_data();
+                        app.load_historical_candles();
+                    }
                     false
                 }
                 _ => false,
