@@ -1,5 +1,5 @@
 use crossterm::{
-    event::{self, Event, KeyCode},
+    event::{self, Event, KeyCode, KeyEventKind},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -11,9 +11,10 @@ use tokio::sync::Mutex;
 
 mod stock;
 mod ui;
+mod watchlist;
 mod websocket;
 
-use ui::{App, AppState, WebSocketStatus};
+use ui::{App, AppState, LandingPanel, WebSocketStatus};
 use websocket::LivePrice;
 use std::fs::OpenOptions;
 use std::io::Write;
@@ -94,10 +95,12 @@ async fn run_app(
         // Check for keyboard input
         if event::poll(std::time::Duration::from_millis(100))? {
             if let Event::Key(key) = event::read()? {
-                if handle_input(app, key.code, &mut ws_task_handle, &tx, &status_tx).await {
-                    // Stop WebSocket before quitting
-                    stop_websocket(&mut ws_task_handle, &app.ws_should_stop).await;
-                    return Ok(());
+                if key.kind == KeyEventKind::Press {
+                    if handle_input(app, key.code, &mut ws_task_handle, &tx, &status_tx).await {
+                        // Stop WebSocket before quitting
+                        stop_websocket(&mut ws_task_handle, &app.ws_should_stop).await;
+                        return Ok(());
+                    }
                 }
             }
         }
@@ -167,16 +170,35 @@ async fn handle_input(
                     KeyCode::Char('s') => {
                         app.input_mode = true;
                     }
+                    KeyCode::Tab => {
+                        app.landing_panel = match app.landing_panel {
+                            LandingPanel::Popular => LandingPanel::Watchlist,
+                            LandingPanel::Watchlist => LandingPanel::Popular,
+                        };
+                    }
                     KeyCode::Up => {
-                        app.previous_popular();
+                        match app.landing_panel {
+                            LandingPanel::Popular => app.previous_popular(),
+                            LandingPanel::Watchlist => app.previous_watchlist(),
+                        }
                     }
                     KeyCode::Down => {
-                        app.next_popular();
+                        match app.landing_panel {
+                            LandingPanel::Popular => app.next_popular(),
+                            LandingPanel::Watchlist => app.next_watchlist(),
+                        }
                     }
                     KeyCode::Enter => {
-                        // Stop existing WebSocket and fetch data
                         stop_websocket(ws_task_handle, &app.ws_should_stop).await;
-                        app.select_popular();
+                        match app.landing_panel {
+                            LandingPanel::Popular => app.select_popular(),
+                            LandingPanel::Watchlist => app.select_watchlist(),
+                        }
+                    }
+                    KeyCode::Char('d') => {
+                        if app.landing_panel == LandingPanel::Watchlist {
+                            app.remove_from_watchlist();
+                        }
                     }
                     KeyCode::Char('h') => {
                         app.show_help = !app.show_help;
@@ -287,6 +309,10 @@ async fn handle_input(
                     app.show_help = !app.show_help;
                     false
                 }
+                KeyCode::Char('w') => {
+                    app.add_to_watchlist();
+                    false
+                }
                 // Candlestick toggle disabled for now
                 // KeyCode::Char('c') => {
                 //     app.show_candlesticks = !app.show_candlesticks;
@@ -324,6 +350,31 @@ async fn handle_input(
             }
         },
         AppState::LiveTicker | AppState::LiveCandles => {
+            // Handle alert input popup
+            if app.show_alert_input {
+                match key {
+                    KeyCode::Enter => {
+                        if let Ok(target) = app.alert_input_buffer.parse::<f64>() {
+                            app.set_price_alert(target);
+                        }
+                        app.alert_input_buffer.clear();
+                        app.show_alert_input = false;
+                    }
+                    KeyCode::Esc => {
+                        app.alert_input_buffer.clear();
+                        app.show_alert_input = false;
+                    }
+                    KeyCode::Backspace => {
+                        app.alert_input_buffer.pop();
+                    }
+                    KeyCode::Char(c) if c.is_ascii_digit() || c == '.' => {
+                        app.alert_input_buffer.push(c);
+                    }
+                    _ => {}
+                }
+                return false;
+            }
+
             // Handle popups first
             if app.show_help {
                 match key {
@@ -392,6 +443,15 @@ async fn handle_input(
                 }
                 KeyCode::Char('e') => {
                     app.show_error_log = !app.show_error_log;
+                    false
+                }
+                KeyCode::Char('p') => {
+                    if app.price_alert.is_some() {
+                        app.clear_price_alert();
+                    } else {
+                        app.alert_input_buffer.clear();
+                        app.show_alert_input = true;
+                    }
                     false
                 }
                 KeyCode::Left => {

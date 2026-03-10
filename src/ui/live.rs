@@ -14,7 +14,7 @@ pub fn render_live_ticker(f: &mut Frame, app: &App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(4),
+            Constraint::Length(5),
             Constraint::Min(0),
             Constraint::Length(3),
         ])
@@ -80,7 +80,7 @@ pub fn render_live_candles(f: &mut Frame, app: &App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(4),
+            Constraint::Length(5),
             Constraint::Min(0),
             Constraint::Length(5),
         ])
@@ -140,6 +140,29 @@ fn render_live_header(f: &mut Frame, app: &App, area: ratatui::layout::Rect, mod
         _ => Span::styled("[DISCONNECTED]", Style::default().fg(Color::Gray)),
     };
 
+    let alert_line = if app.alert_triggered {
+        if let Some(target) = app.price_alert {
+            Line::from(vec![
+                Span::styled(
+                    format!("⚡ ALERT: Price crossed ${:.2} — press 'p' to clear", target),
+                    Style::default().fg(Color::Black).bg(Color::Yellow).add_modifier(Modifier::BOLD),
+                ),
+            ])
+        } else {
+            Line::from("")
+        }
+    } else if let Some(target) = app.price_alert {
+        let direction = if app.alert_above.unwrap_or(true) { "↑" } else { "↓" };
+        Line::from(vec![
+            Span::styled(
+                format!("Alert: ${:.2} {} (p: clear)", target, direction),
+                Style::default().fg(Color::Yellow),
+            ),
+        ])
+    } else {
+        Line::from(Span::styled("p: Set alert", Style::default().fg(Color::DarkGray)))
+    };
+
     let header_text = vec![
         Line::from(vec![
             Span::styled(
@@ -164,11 +187,56 @@ fn render_live_header(f: &mut Frame, app: &App, area: ratatui::layout::Rect, mod
                 Style::default().fg(Color::Cyan),
             ),
         ]),
+        alert_line,
     ];
 
     let header = Paragraph::new(header_text)
         .block(Block::default().borders(Borders::ALL));
     f.render_widget(header, area);
+}
+
+pub fn render_alert_input(f: &mut Frame, app: &App) {
+    use ratatui::widgets::Clear;
+
+    let area = f.area();
+    let popup_width = 40u16;
+    let popup_height = 6u16;
+    let popup_x = (area.width.saturating_sub(popup_width)) / 2;
+    let popup_y = (area.height.saturating_sub(popup_height)) / 2;
+
+    let popup_area = ratatui::layout::Rect {
+        x: popup_x,
+        y: popup_y,
+        width: popup_width,
+        height: popup_height,
+    };
+
+    let current_price = app.last_live_price.map(|p| format!("Current: ${:.2}", p)).unwrap_or_default();
+
+    let text = vec![
+        Line::from(""),
+        Line::from(Span::styled(current_price, Style::default().fg(Color::Gray))),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("> $", Style::default().fg(Color::Yellow)),
+            Span::styled(
+                format!("{}_", app.alert_input_buffer),
+                Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+            ),
+        ]),
+    ];
+
+    let popup = Paragraph::new(text)
+        .alignment(Alignment::Center)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title("Set Price Alert  (Enter: confirm | Esc: cancel)")
+                .style(Style::default().bg(Color::Black)),
+        );
+
+    f.render_widget(Clear, popup_area);
+    f.render_widget(popup, popup_area);
 }
 
 fn render_live_footer(f: &mut Frame, area: ratatui::layout::Rect) {

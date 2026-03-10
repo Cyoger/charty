@@ -22,7 +22,7 @@ mod chart;
 use chart::render_chart_view;
 
 mod live;
-use live::{render_live_ticker, render_live_candles, render_live_mode_select, render_error_log};
+use live::{render_live_ticker, render_live_candles, render_live_mode_select, render_error_log, render_alert_input};
 
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
@@ -64,6 +64,12 @@ pub enum AppState {
     Chart,
     LiveTicker,
     LiveCandles,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum LandingPanel {
+    Popular,
+    Watchlist,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -174,6 +180,15 @@ pub struct App {
     pub total_live_volume: u64,
     pub total_trade_count: u32,
     pub show_help: bool,
+    pub watchlist: Vec<String>,
+    pub watchlist_state: ListState,
+    pub landing_panel: LandingPanel,
+    // Price alert
+    pub price_alert: Option<f64>,
+    pub alert_triggered: bool,
+    pub alert_above: Option<bool>, // true = alert when price goes above, false = below
+    pub show_alert_input: bool,
+    pub alert_input_buffer: String,
 }
 
 impl App {
@@ -223,6 +238,14 @@ impl App {
             total_live_volume: 0,
             total_trade_count: 0,
             show_help: false,
+            watchlist: crate::watchlist::load(),
+            watchlist_state: ListState::default(),
+            landing_panel: LandingPanel::Popular,
+            price_alert: None,
+            alert_triggered: false,
+            alert_above: None,
+            show_alert_input: false,
+            alert_input_buffer: String::new(),
         }
     }
 
@@ -250,8 +273,34 @@ impl App {
         self.loading = false;
     }
 
+    pub fn set_price_alert(&mut self, target: f64) {
+        let current = self.last_live_price.unwrap_or(target);
+        self.alert_above = Some(current < target); // true = waiting for price to go UP to target
+        self.price_alert = Some(target);
+        self.alert_triggered = false;
+    }
+
+    pub fn clear_price_alert(&mut self) {
+        self.price_alert = None;
+        self.alert_triggered = false;
+        self.alert_above = None;
+    }
+
     pub fn update_live_price(&mut self, price: f64, volume: Option<u64>) {
         let now = Utc::now();
+
+        // Check price alert before updating
+        if let (Some(target), Some(above), false) = (self.price_alert, self.alert_above, self.alert_triggered) {
+            let crossed = if above {
+                price >= target
+            } else {
+                price <= target
+            };
+            if crossed {
+                self.alert_triggered = true;
+            }
+        }
+
         self.last_live_price = Some(price);
         self.ws_last_update = Some(now);
         self.total_trade_count += 1;
@@ -406,6 +455,64 @@ impl App {
             self.symbol = self.popular_stocks[i].0.to_string();
             self.fetch_data();
         }
+    }
+
+    pub fn add_to_watchlist(&mut self) {
+        if self.symbol.is_empty() {
+            return;
+        }
+        if !self.watchlist.contains(&self.symbol) {
+            self.watchlist.push(self.symbol.clone());
+            crate::watchlist::save(&self.watchlist);
+        }
+    }
+
+    pub fn remove_from_watchlist(&mut self) {
+        if let Some(i) = self.watchlist_state.selected() {
+            self.watchlist.remove(i);
+            crate::watchlist::save(&self.watchlist);
+            let new_i = if self.watchlist.is_empty() {
+                None
+            } else {
+                Some(i.min(self.watchlist.len() - 1))
+            };
+            self.watchlist_state.select(new_i);
+        }
+    }
+
+    pub fn select_watchlist(&mut self) {
+        if let Some(i) = self.watchlist_state.selected() {
+            if let Some(symbol) = self.watchlist.get(i) {
+                self.symbol = symbol.clone();
+                self.fetch_data();
+            }
+        }
+    }
+
+    pub fn next_watchlist(&mut self) {
+        if self.watchlist.is_empty() {
+            return;
+        }
+        let i = match self.watchlist_state.selected() {
+            Some(i) => {
+                if i >= self.watchlist.len() - 1 { 0 } else { i + 1 }
+            }
+            None => 0,
+        };
+        self.watchlist_state.select(Some(i));
+    }
+
+    pub fn previous_watchlist(&mut self) {
+        if self.watchlist.is_empty() {
+            return;
+        }
+        let i = match self.watchlist_state.selected() {
+            Some(i) => {
+                if i == 0 { self.watchlist.len() - 1 } else { i - 1 }
+            }
+            None => 0,
+        };
+        self.watchlist_state.select(Some(i));
     }
 
     pub fn load_historical_candles(&mut self) {
@@ -570,5 +677,8 @@ pub fn ui(f: &mut Frame, app: &App) {
     }
     if app.show_help {
         render_help(f, app);
+    }
+    if app.show_alert_input {
+        render_alert_input(f, app);
     }
 }
