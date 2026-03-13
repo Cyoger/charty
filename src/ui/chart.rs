@@ -9,7 +9,7 @@ use ratatui::{
 use chrono::{DateTime, Utc, Local};
 
 use super::{App, Candlestick};
-use crate::stock::TimeFrame;
+use crate::stock::{TimeFrame, MarketState};
 
 pub fn render_chart_view(f: &mut Frame, app: &App) {
     let chunks = Layout::default()
@@ -36,13 +36,18 @@ fn render_header(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
 
         let change_symbol = if stock_data.change >= 0.0 { "▲" } else { "▼" };
 
-        let header_text = vec![Line::from(vec![
+        let (market_badge, badge_color) = match stock_data.market_state {
+            MarketState::Regular => (None, Color::Green),
+            MarketState::Pre    => (Some(" ◑ Pre-Market"), Color::Yellow),
+            MarketState::Post   => (Some(" ☾ After Hours"), Color::Yellow),
+            MarketState::Closed => (Some(" ● Market Closed"), Color::DarkGray),
+        };
+
+        let mut spans = vec![
             Span::raw(format!("{} ", stock_data.symbol)),
             Span::styled(
                 format!("${:.2}", stock_data.current_price),
-                Style::default()
-                    .fg(price_color)
-                    .add_modifier(Modifier::BOLD),
+                Style::default().fg(price_color).add_modifier(Modifier::BOLD),
             ),
             Span::raw("  "),
             Span::styled(
@@ -55,9 +60,13 @@ fn render_header(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
                 Style::default().fg(price_color),
             ),
             Span::raw(format!("  [{}]", app.timeframe.display())),
-        ])];
+        ];
 
-        let header = Paragraph::new(header_text)
+        if let Some(badge) = market_badge {
+            spans.push(Span::styled(badge, Style::default().fg(badge_color)));
+        }
+
+        let header = Paragraph::new(Line::from(spans))
             .block(Block::default().borders(Borders::ALL).title("Stock Info"));
         f.render_widget(header, area);
     } else if app.loading {

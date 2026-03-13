@@ -9,6 +9,44 @@ use ratatui::{
 use super::{App, LandingPanel};
 
 
+fn quote_spans(app: &App, symbol: &str) -> Vec<Span<'static>> {
+    use crate::stock::MarketState;
+
+    if let Some(q) = app.landing_quotes.get(symbol) {
+        let color = if q.change_percent >= 0.0 { Color::Green } else { Color::Red };
+        let sign = if q.change_percent >= 0.0 { "+" } else { "" };
+
+        let mut spans = vec![
+            Span::styled(
+                format!("{:>9.2}", q.price),
+                Style::default().fg(Color::White),
+            ),
+            Span::raw("  "),
+            Span::styled(
+                format!("{}{:.2}%", sign, q.change_percent),
+                Style::default().fg(color).add_modifier(Modifier::BOLD),
+            ),
+        ];
+
+        if let Some(label) = q.market_state.label() {
+            let label_color = match q.market_state {
+                MarketState::Closed => Color::DarkGray,
+                MarketState::Pre | MarketState::Post => Color::Yellow,
+                MarketState::Regular => Color::Green,
+            };
+            spans.push(Span::raw(" "));
+            spans.push(Span::styled(
+                format!("[{}]", label),
+                Style::default().fg(label_color),
+            ));
+        }
+
+        spans
+    } else {
+        vec![Span::styled("  --", Style::default().fg(Color::DarkGray))]
+    }
+}
+
 pub fn render_landing(f: &mut Frame, app: &App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -57,16 +95,22 @@ pub fn render_landing(f: &mut Frame, app: &App) {
         .popular_stocks
         .iter()
         .map(|(ticker, name)| {
-            ListItem::new(Line::from(vec![
+            let mut spans = vec![
                 Span::styled(
-                    format!("{:8}", ticker),
+                    format!("{:<7}", ticker),
                     Style::default()
                         .fg(Color::Yellow)
                         .add_modifier(Modifier::BOLD),
                 ),
                 Span::raw(" "),
-                Span::styled(name.to_string(), Style::default().fg(Color::White)),
-            ]))
+                Span::styled(
+                    format!("{:<18}", truncate(name, 18)),
+                    Style::default().fg(Color::White),
+                ),
+                Span::raw(" "),
+            ];
+            spans.extend(quote_spans(app, ticker));
+            ListItem::new(Line::from(spans))
         })
         .collect();
 
@@ -145,10 +189,15 @@ pub fn render_landing(f: &mut Frame, app: &App) {
             .watchlist
             .iter()
             .map(|symbol| {
-                ListItem::new(Line::from(Span::styled(
-                    symbol.clone(),
-                    Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
-                )))
+                let mut spans = vec![
+                    Span::styled(
+                        format!("{:<12}", symbol),
+                        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                    ),
+                    Span::raw(" "),
+                ];
+                spans.extend(quote_spans(app, symbol));
+                ListItem::new(Line::from(spans))
             })
             .collect();
 
@@ -173,11 +222,19 @@ pub fn render_landing(f: &mut Frame, app: &App) {
     let footer_text = if app.input_mode {
         "Enter: Confirm | Esc: Cancel"
     } else {
-        "↑/↓: Navigate | Enter: Select | Tab: Switch panel | s: Search | d: Remove | q: Quit"
+        "↑/↓: Navigate | Enter: Select | Tab: Switch panel | s: Search | m: Market | r: Refresh | d: Remove | q: Quit"
     };
 
     let footer = Paragraph::new(footer_text)
         .block(Block::default().borders(Borders::ALL).title("Controls"))
         .alignment(Alignment::Center);
     f.render_widget(footer, chunks[2]);
+}
+
+fn truncate(s: &str, max: usize) -> &str {
+    if s.len() <= max {
+        s
+    } else {
+        &s[..max]
+    }
 }

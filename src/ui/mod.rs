@@ -8,7 +8,7 @@ use crate::stock::StockData;
 use std::sync::Arc;
 use std::time::Instant;
 use std::time::Duration;
-use std::collections::VecDeque;
+use std::collections::{VecDeque, HashMap};
 use tokio::sync::Mutex;
 use chrono::{DateTime, Utc};
 use ratatui::text::{Line, Span};
@@ -23,6 +23,9 @@ use chart::render_chart_view;
 
 mod live;
 use live::{render_live_ticker, render_live_candles, render_live_mode_select, render_error_log, render_alert_input};
+
+mod market;
+use market::render_market_view;
 
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
@@ -64,6 +67,14 @@ pub enum AppState {
     Chart,
     LiveTicker,
     LiveCandles,
+    Market,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum MarketPanel {
+    Gainers,
+    Losers,
+    Active,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -183,6 +194,19 @@ pub struct App {
     pub watchlist: Vec<String>,
     pub watchlist_state: ListState,
     pub landing_panel: LandingPanel,
+    // Landing quotes
+    pub landing_quotes: HashMap<String, crate::stock::QuoteSnapshot>,
+    pub yahoo_session: Option<crate::stock::YahooSession>,
+    // Market overview
+    pub market_gainers: Vec<crate::stock::MarketMover>,
+    pub market_losers: Vec<crate::stock::MarketMover>,
+    pub market_active: Vec<crate::stock::MarketMover>,
+    pub market_loading: bool,
+    pub market_error: Option<String>,
+    pub market_panel: MarketPanel,
+    pub market_gainers_state: ListState,
+    pub market_losers_state: ListState,
+    pub market_active_state: ListState,
     // Price alert
     pub price_alert: Option<f64>,
     pub alert_triggered: bool,
@@ -241,6 +265,17 @@ impl App {
             watchlist: crate::watchlist::load(),
             watchlist_state: ListState::default(),
             landing_panel: LandingPanel::Popular,
+            landing_quotes: HashMap::new(),
+            yahoo_session: None,
+            market_gainers: Vec::new(),
+            market_losers: Vec::new(),
+            market_active: Vec::new(),
+            market_loading: false,
+            market_error: None,
+            market_panel: MarketPanel::Gainers,
+            market_gainers_state: ListState::default(),
+            market_losers_state: ListState::default(),
+            market_active_state: ListState::default(),
             price_alert: None,
             alert_triggered: false,
             alert_above: None,
@@ -425,11 +460,7 @@ impl App {
     pub fn next_popular(&mut self) {
         let i = match self.popular_list_state.selected() {
             Some(i) => {
-                if i >= self.popular_stocks.len() - 1 {
-                    0
-                } else {
-                    i + 1
-                }
+                if i >= self.popular_stocks.len() - 1 { 0 } else { i + 1 }
             }
             None => 0,
         };
@@ -439,11 +470,7 @@ impl App {
     pub fn previous_popular(&mut self) {
         let i = match self.popular_list_state.selected() {
             Some(i) => {
-                if i == 0 {
-                    self.popular_stocks.len() - 1
-                } else {
-                    i - 1
-                }
+                if i == 0 { self.popular_stocks.len() - 1 } else { i - 1 }
             }
             None => 0,
         };
@@ -513,6 +540,134 @@ impl App {
             None => 0,
         };
         self.watchlist_state.select(Some(i));
+    }
+
+    pub fn refresh_landing_quotes(&mut self) {
+        // Ensure we have a valid session
+        if self.yahoo_session.is_none() {
+            match crate::stock::YahooSession::new() {
+                Ok(session) => self.yahoo_session = Some(session),
+                Err(_) => return,
+            }
+        }
+
+        let mut symbols: Vec<&str> = self.popular_stocks.iter().map(|(t, _)| *t).collect();
+        let watchlist_syms: Vec<String> = self.watchlist.clone();
+        let watchlist_refs: Vec<&str> = watchlist_syms.iter().map(|s| s.as_str()).collect();
+        for s in &watchlist_refs {
+            if !symbols.contains(s) {
+                symbols.push(s);
+            }
+        }
+
+        if let Some(ref session) = self.yahoo_session {
+            match crate::stock::fetch_batch_quotes(session, &symbols) {
+                Ok(quotes) => self.landing_quotes = quotes,
+                Err(_) => {
+                    // Session may have expired — clear it so next call re-authenticates
+                    self.yahoo_session = None;
+                }
+            }
+        }
+    }
+
+    pub fn fetch_market_data(&mut self) {
+        self.market_loading = true;
+        self.market_error = None;
+
+        match crate::stock::fetch_market_movers("day_gainers", 10) {
+            Ok(data) => self.market_gainers = data,
+            Err(e) => {
+                self.market_error = Some(format!("Failed to load market data: {}", e));
+            }
+        }
+
+        if self.market_error.is_none() {
+            match crate::stock::fetch_market_movers("day_losers", 10) {
+                Ok(data) => self.market_losers = data,
+                Err(e) => {
+                    self.market_error = Some(format!("Failed to load market data: {}", e));
+                }
+            }
+        }
+
+        if self.market_error.is_none() {
+            match crate::stock::fetch_market_movers("most_actives", 10) {
+                Ok(data) => self.market_active = data,
+                Err(e) => {
+                    self.market_error = Some(format!("Failed to load market data: {}", e));
+                }
+            }
+        }
+
+        if self.market_error.is_none() {
+            if !self.market_gainers.is_empty() {
+                self.market_gainers_state.select(Some(0));
+            }
+            if !self.market_losers.is_empty() {
+                self.market_losers_state.select(Some(0));
+            }
+            if !self.market_active.is_empty() {
+                self.market_active_state.select(Some(0));
+            }
+        }
+
+        self.market_loading = false;
+    }
+
+    pub fn market_list_state_mut(&mut self) -> &mut ListState {
+        match self.market_panel {
+            MarketPanel::Gainers => &mut self.market_gainers_state,
+            MarketPanel::Losers => &mut self.market_losers_state,
+            MarketPanel::Active => &mut self.market_active_state,
+        }
+    }
+
+    pub fn market_panel_len(&self) -> usize {
+        match self.market_panel {
+            MarketPanel::Gainers => self.market_gainers.len(),
+            MarketPanel::Losers => self.market_losers.len(),
+            MarketPanel::Active => self.market_active.len(),
+        }
+    }
+
+    pub fn next_market(&mut self) {
+        let len = self.market_panel_len();
+        if len == 0 { return; }
+        let i = match self.market_list_state_mut().selected() {
+            Some(i) => if i >= len - 1 { 0 } else { i + 1 },
+            None => 0,
+        };
+        self.market_list_state_mut().select(Some(i));
+    }
+
+    pub fn previous_market(&mut self) {
+        let len = self.market_panel_len();
+        if len == 0 { return; }
+        let i = match self.market_list_state_mut().selected() {
+            Some(i) => if i == 0 { len - 1 } else { i - 1 },
+            None => 0,
+        };
+        self.market_list_state_mut().select(Some(i));
+    }
+
+    pub fn select_market(&mut self) {
+        let idx = match self.market_panel {
+            MarketPanel::Gainers => self.market_gainers_state.selected(),
+            MarketPanel::Losers => self.market_losers_state.selected(),
+            MarketPanel::Active => self.market_active_state.selected(),
+        };
+        if let Some(i) = idx {
+            let symbol = match self.market_panel {
+                MarketPanel::Gainers => self.market_gainers.get(i).map(|m| m.symbol.clone()),
+                MarketPanel::Losers => self.market_losers.get(i).map(|m| m.symbol.clone()),
+                MarketPanel::Active => self.market_active.get(i).map(|m| m.symbol.clone()),
+            };
+            if let Some(sym) = symbol {
+                self.symbol = sym;
+                self.fetch_data();
+            }
+        }
     }
 
     pub fn load_historical_candles(&mut self) {
@@ -666,6 +821,7 @@ pub fn ui(f: &mut Frame, app: &App) {
         AppState::Chart => render_chart_view(f, app),
         AppState::LiveTicker => render_live_ticker(f, app),
         AppState::LiveCandles => render_live_candles(f, app),
+        AppState::Market => render_market_view(f, app),
     }
 
     // Render popups on top

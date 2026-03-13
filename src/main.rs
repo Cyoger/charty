@@ -14,7 +14,9 @@ mod ui;
 mod watchlist;
 mod websocket;
 
-use ui::{App, AppState, LandingPanel, WebSocketStatus};
+use ui::{App, AppState, LandingPanel, MarketPanel, WebSocketStatus};
+use std::collections::HashMap;
+use crate::stock::QuoteSnapshot;
 use websocket::LivePrice;
 use std::fs::OpenOptions;
 use std::io::Write;
@@ -34,6 +36,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let (tx, mut rx) = mpsc::unbounded_channel::<LivePrice>();
     let (status_tx, mut status_rx) = mpsc::unbounded_channel::<WebSocketStatus>();
+    let (quotes_tx, mut quotes_rx) = mpsc::unbounded_channel::<HashMap<String, QuoteSnapshot>>();
+
+    // Fetch landing quotes in background so terminal opens immediately
+    tokio::spawn(async move {
+        let result = tokio::task::spawn_blocking(move || {
+            match crate::stock::YahooSession::new() {
+                Ok(session) => {
+                    let syms: Vec<&str> = vec![
+                        "^GSPC", "^DJI", "^IXIC", "SPY", "QQQ",
+                        "AAPL", "MSFT", "GOOGL", "AMZN", "TSLA", "NVDA", "META",
+                    ];
+                    crate::stock::fetch_batch_quotes(&session, &syms).ok()
+                }
+                Err(_) => None,
+            }
+        }).await;
+        if let Ok(Some(quotes)) = result {
+            let _ = quotes_tx.send(quotes);
+        }
+    });
 
     // Setup terminal
     enable_raw_mode()?;
@@ -43,7 +65,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut terminal = Terminal::new(backend)?;
 
     // Run the app
-    let res = run_app(&mut terminal, &mut app, &mut rx, &mut status_rx, tx, status_tx).await;
+    let res = run_app(&mut terminal, &mut app, &mut rx, &mut status_rx, &mut quotes_rx, tx, status_tx).await;
 
     // Restore terminal
     disable_raw_mode()?;
@@ -62,6 +84,7 @@ async fn run_app(
     app: &mut App,
     rx: &mut mpsc::UnboundedReceiver<LivePrice>,
     status_rx: &mut mpsc::UnboundedReceiver<WebSocketStatus>,
+    quotes_rx: &mut mpsc::UnboundedReceiver<HashMap<String, QuoteSnapshot>>,
     tx: mpsc::UnboundedSender<LivePrice>,
     status_tx: mpsc::UnboundedSender<WebSocketStatus>,
 ) -> Result<(), io::Error> {
@@ -72,11 +95,15 @@ async fn run_app(
 
         // Check for WebSocket status updates
         while let Ok(status) = status_rx.try_recv() {
-            // Add errors to error log
             if let WebSocketStatus::Error { ref message, .. } = status {
                 app.add_error_to_log(message.clone());
             }
             app.ws_status = status;
+        }
+
+        // Check for background quote updates
+        if let Ok(quotes) = quotes_rx.try_recv() {
+            app.landing_quotes = quotes;
         }
 
         // Check for live price updates with throttling
@@ -203,8 +230,41 @@ async fn handle_input(
                     KeyCode::Char('h') => {
                         app.show_help = !app.show_help;
                     }
+                    KeyCode::Char('m') => {
+                        app.state = AppState::Market;
+                        app.fetch_market_data();
+                    }
+                    KeyCode::Char('r') => {
+                        app.refresh_landing_quotes();
+                    }
                     _ => {}
                 }
+            }
+            false
+        }
+        AppState::Market => {
+            match key {
+                KeyCode::Char('q') => return true,
+                KeyCode::Char('b') | KeyCode::Esc => {
+                    app.state = AppState::Landing;
+                }
+                KeyCode::Char('r') => {
+                    app.fetch_market_data();
+                }
+                KeyCode::Tab => {
+                    app.market_panel = match app.market_panel {
+                        MarketPanel::Gainers => MarketPanel::Losers,
+                        MarketPanel::Losers => MarketPanel::Active,
+                        MarketPanel::Active => MarketPanel::Gainers,
+                    };
+                }
+                KeyCode::Up => app.previous_market(),
+                KeyCode::Down => app.next_market(),
+                KeyCode::Enter => {
+                    stop_websocket(ws_task_handle, &app.ws_should_stop).await;
+                    app.select_market();
+                }
+                _ => {}
             }
             false
         }
