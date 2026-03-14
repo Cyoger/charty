@@ -41,6 +41,19 @@ fn quote_spans(app: &App, symbol: &str) -> Vec<Span<'static>> {
             ));
         }
 
+        if let Some(alert) = app.alert_for_symbol(symbol) {
+            spans.push(Span::raw(" "));
+            if alert.triggered {
+                spans.push(Span::styled("[⚡]", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)));
+            } else {
+                let direction = if alert.above { "↑" } else { "↓" };
+                spans.push(Span::styled(
+                    format!("[!${:.0}{}]", alert.target, direction),
+                    Style::default().fg(Color::Yellow),
+                ));
+            }
+        }
+
         spans
     } else {
         vec![Span::styled("  --", Style::default().fg(Color::DarkGray))]
@@ -222,7 +235,7 @@ pub fn render_landing(f: &mut Frame, app: &App) {
     let footer_text = if app.input_mode {
         "Enter: Confirm | Esc: Cancel"
     } else {
-        "↑/↓: Navigate | Enter: Select | Tab: Switch panel | s: Search | m: Market | r: Refresh | d: Remove | q: Quit"
+        "↑/↓: Navigate | Enter: Select | Tab: Switch | s: Search | a: Alert | m: Market | r: Refresh | d: Remove | q: Quit"
     };
 
     let footer = Paragraph::new(footer_text)

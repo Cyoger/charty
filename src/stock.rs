@@ -138,7 +138,7 @@ impl MarketState {
 
     pub fn label(&self) -> Option<&'static str> {
         match self {
-            MarketState::Regular => None,
+            MarketState::Regular => Some("O"),
             MarketState::Pre => Some("PM"),
             MarketState::Post => Some("AH"),
             MarketState::Closed => Some("C"),
@@ -210,7 +210,9 @@ pub fn fetch_stock_data(symbol: &str, timeframe: TimeFrame) -> Result<StockData,
         include_prepost,
     );
 
-    let response = ureq::get(&url).call()?;
+    let response = ureq::get(&url)
+        .set("User-Agent", "Mozilla/5.0")
+        .call()?;
     let json: serde_json::Value = response.into_json()?;
 
     let chart = &json["chart"]["result"][0];

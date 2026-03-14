@@ -9,6 +9,7 @@ use tokio::sync::mpsc;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
+mod alerts;
 mod stock;
 mod ui;
 mod watchlist;
@@ -39,6 +40,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (quotes_tx, mut quotes_rx) = mpsc::unbounded_channel::<HashMap<String, QuoteSnapshot>>();
 
     // Fetch landing quotes in background so terminal opens immediately
+    let quotes_tx_init = quotes_tx.clone();
     tokio::spawn(async move {
         let result = tokio::task::spawn_blocking(move || {
             match crate::stock::YahooSession::new() {
@@ -53,7 +55,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }).await;
         if let Ok(Some(quotes)) = result {
-            let _ = quotes_tx.send(quotes);
+            let _ = quotes_tx_init.send(quotes);
         }
     });
 
@@ -65,7 +67,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut terminal = Terminal::new(backend)?;
 
     // Run the app
-    let res = run_app(&mut terminal, &mut app, &mut rx, &mut status_rx, &mut quotes_rx, tx, status_tx).await;
+    let res = run_app(&mut terminal, &mut app, &mut rx, &mut status_rx, &mut quotes_rx, tx, status_tx, quotes_tx).await;
 
     // Restore terminal
     disable_raw_mode()?;
@@ -87,8 +89,11 @@ async fn run_app(
     quotes_rx: &mut mpsc::UnboundedReceiver<HashMap<String, QuoteSnapshot>>,
     tx: mpsc::UnboundedSender<LivePrice>,
     status_tx: mpsc::UnboundedSender<WebSocketStatus>,
+    quotes_tx: mpsc::UnboundedSender<HashMap<String, QuoteSnapshot>>,
 ) -> Result<(), io::Error> {
     let mut ws_task_handle: Option<tokio::task::JoinHandle<()>> = None;
+    let mut last_alert_check = std::time::Instant::now();
+    const ALERT_CHECK_SECS: u64 = 30;
 
     loop {
         terminal.draw(|f| ui::ui(f, app))?;
@@ -101,9 +106,43 @@ async fn run_app(
             app.ws_status = status;
         }
 
-        // Check for background quote updates
+        // Check for background quote updates; run alert checks on arrival
         if let Ok(quotes) = quotes_rx.try_recv() {
-            app.landing_quotes = quotes;
+            let triggered = app.check_alerts(&quotes);
+            for (symbol, target) in triggered {
+                let msg = format!("{} crossed ${:.2}", symbol, target);
+                let _ = std::process::Command::new("notify-send")
+                    .arg("Charty Price Alert")
+                    .arg(&msg)
+                    .spawn();
+            }
+            app.landing_quotes.extend(quotes.into_iter());
+        }
+
+        // Periodically fetch prices for any pending alerts
+        let pending_alert_syms: Vec<String> = app.alerts.iter()
+            .filter(|a| !a.triggered)
+            .map(|a| a.symbol.clone())
+            .collect();
+        if !pending_alert_syms.is_empty()
+            && last_alert_check.elapsed().as_secs() >= ALERT_CHECK_SECS
+        {
+            last_alert_check = std::time::Instant::now();
+            let qtx = quotes_tx.clone();
+            tokio::spawn(async move {
+                let result = tokio::task::spawn_blocking(move || {
+                    match crate::stock::YahooSession::new() {
+                        Ok(session) => {
+                            let syms: Vec<&str> = pending_alert_syms.iter().map(|s| s.as_str()).collect();
+                            crate::stock::fetch_batch_quotes(&session, &syms).ok()
+                        }
+                        Err(_) => None,
+                    }
+                }).await;
+                if let Ok(Some(quotes)) = result {
+                    let _ = qtx.send(quotes);
+                }
+            });
         }
 
         // Check for live price updates with throttling
@@ -152,6 +191,31 @@ async fn handle_input(
     tx: &mpsc::UnboundedSender<LivePrice>,
     status_tx: &mpsc::UnboundedSender<WebSocketStatus>,
 ) -> bool {
+    // Alert input popup is modal — handle it before any state-specific logic
+    if app.show_alert_input {
+        match key {
+            KeyCode::Enter => {
+                if let Ok(target) = app.alert_input_buffer.parse::<f64>() {
+                    let sym = app.alert_target_symbol.clone();
+                    let current = app.current_price_for(&sym).unwrap_or(target);
+                    app.set_price_alert(sym, target, current);
+                }
+                app.alert_input_buffer.clear();
+                app.show_alert_input = false;
+            }
+            KeyCode::Esc => {
+                app.alert_input_buffer.clear();
+                app.show_alert_input = false;
+            }
+            KeyCode::Backspace => { app.alert_input_buffer.pop(); }
+            KeyCode::Char(c) if c.is_ascii_digit() || c == '.' => {
+                app.alert_input_buffer.push(c);
+            }
+            _ => {}
+        }
+        return false;
+    }
+
     match app.state {
         AppState::Landing => {
             // Handle help popup first
@@ -229,6 +293,17 @@ async fn handle_input(
                     }
                     KeyCode::Char('h') => {
                         app.show_help = !app.show_help;
+                    }
+                    KeyCode::Char('a') => {
+                        if let Some(sym) = app.selected_symbol() {
+                            if app.alert_for_symbol(&sym).is_some() {
+                                app.clear_price_alert(&sym);
+                            } else {
+                                app.alert_target_symbol = sym;
+                                app.alert_input_buffer.clear();
+                                app.show_alert_input = true;
+                            }
+                        }
                     }
                     KeyCode::Char('m') => {
                         app.state = AppState::Market;
@@ -378,6 +453,17 @@ async fn handle_input(
                 //     app.show_candlesticks = !app.show_candlesticks;
                 //     false
                 // }
+                KeyCode::Char('a') => {
+                    let sym = app.symbol.clone();
+                    if app.alert_for_symbol(&sym).is_some() {
+                        app.clear_price_alert(&sym);
+                    } else {
+                        app.alert_target_symbol = sym;
+                        app.alert_input_buffer.clear();
+                        app.show_alert_input = true;
+                    }
+                    false
+                }
                 KeyCode::Char('r') => {
                     app.fetch_data();
                     false
@@ -410,31 +496,6 @@ async fn handle_input(
             }
         },
         AppState::LiveTicker | AppState::LiveCandles => {
-            // Handle alert input popup
-            if app.show_alert_input {
-                match key {
-                    KeyCode::Enter => {
-                        if let Ok(target) = app.alert_input_buffer.parse::<f64>() {
-                            app.set_price_alert(target);
-                        }
-                        app.alert_input_buffer.clear();
-                        app.show_alert_input = false;
-                    }
-                    KeyCode::Esc => {
-                        app.alert_input_buffer.clear();
-                        app.show_alert_input = false;
-                    }
-                    KeyCode::Backspace => {
-                        app.alert_input_buffer.pop();
-                    }
-                    KeyCode::Char(c) if c.is_ascii_digit() || c == '.' => {
-                        app.alert_input_buffer.push(c);
-                    }
-                    _ => {}
-                }
-                return false;
-            }
-
             // Handle popups first
             if app.show_help {
                 match key {
@@ -505,10 +566,12 @@ async fn handle_input(
                     app.show_error_log = !app.show_error_log;
                     false
                 }
-                KeyCode::Char('p') => {
-                    if app.price_alert.is_some() {
-                        app.clear_price_alert();
+                KeyCode::Char('a') | KeyCode::Char('p') => {
+                    let sym = app.symbol.clone();
+                    if app.alert_for_symbol(&sym).is_some() {
+                        app.clear_price_alert(&sym);
                     } else {
+                        app.alert_target_symbol = sym;
                         app.alert_input_buffer.clear();
                         app.show_alert_input = true;
                     }

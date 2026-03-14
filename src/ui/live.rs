@@ -140,27 +140,21 @@ fn render_live_header(f: &mut Frame, app: &App, area: ratatui::layout::Rect, mod
         _ => Span::styled("[DISCONNECTED]", Style::default().fg(Color::Gray)),
     };
 
-    let alert_line = if app.alert_triggered {
-        if let Some(target) = app.price_alert {
-            Line::from(vec![
-                Span::styled(
-                    format!("⚡ ALERT: Price crossed ${:.2} — press 'p' to clear", target),
-                    Style::default().fg(Color::Black).bg(Color::Yellow).add_modifier(Modifier::BOLD),
-                ),
-            ])
+    let alert_line = if let Some(alert) = app.alert_for_symbol(&app.symbol) {
+        if alert.triggered {
+            Line::from(Span::styled(
+                format!("⚡ ALERT: {} crossed ${:.2} — press 'a' to clear", alert.symbol, alert.target),
+                Style::default().fg(Color::Black).bg(Color::Yellow).add_modifier(Modifier::BOLD),
+            ))
         } else {
-            Line::from("")
-        }
-    } else if let Some(target) = app.price_alert {
-        let direction = if app.alert_above.unwrap_or(true) { "↑" } else { "↓" };
-        Line::from(vec![
-            Span::styled(
-                format!("Alert: ${:.2} {} (p: clear)", target, direction),
+            let direction = if alert.above { "↑" } else { "↓" };
+            Line::from(Span::styled(
+                format!("Alert: ${:.2} {} (a: clear)", alert.target, direction),
                 Style::default().fg(Color::Yellow),
-            ),
-        ])
+            ))
+        }
     } else {
-        Line::from(Span::styled("p: Set alert", Style::default().fg(Color::DarkGray)))
+        Line::from(Span::styled("a: Set alert", Style::default().fg(Color::DarkGray)))
     };
 
     let header_text = vec![
@@ -211,7 +205,10 @@ pub fn render_alert_input(f: &mut Frame, app: &App) {
         height: popup_height,
     };
 
-    let current_price = app.last_live_price.map(|p| format!("Current: ${:.2}", p)).unwrap_or_default();
+    let sym = &app.alert_target_symbol;
+    let current_price = app.current_price_for(sym)
+        .map(|p| format!("Current: ${:.2}", p))
+        .unwrap_or_default();
 
     let text = vec![
         Line::from(""),
@@ -231,7 +228,7 @@ pub fn render_alert_input(f: &mut Frame, app: &App) {
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .title("Set Price Alert  (Enter: confirm | Esc: cancel)")
+                .title(format!("Alert: {}  (Enter: confirm | Esc: cancel)", app.alert_target_symbol))
                 .style(Style::default().bg(Color::Black)),
         );
 

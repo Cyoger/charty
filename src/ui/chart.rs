@@ -37,7 +37,7 @@ fn render_header(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
         let change_symbol = if stock_data.change >= 0.0 { "▲" } else { "▼" };
 
         let (market_badge, badge_color) = match stock_data.market_state {
-            MarketState::Regular => (None, Color::Green),
+            MarketState::Regular => (Some(" ● Market Open"), Color::Green),
             MarketState::Pre    => (Some(" ◑ Pre-Market"), Color::Yellow),
             MarketState::Post   => (Some(" ☾ After Hours"), Color::Yellow),
             MarketState::Closed => (Some(" ● Market Closed"), Color::DarkGray),
@@ -326,10 +326,27 @@ fn render_chart(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
     }
 }
 
-fn render_footer(f: &mut Frame, _app: &App, area: ratatui::layout::Rect) {
+fn render_footer(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
+    let alert_line = if let Some(alert) = app.alert_for_symbol(&app.symbol) {
+        if alert.triggered {
+            Line::from(Span::styled(
+                format!("⚡ ALERT: {} crossed ${:.2} — press 'a' to clear", alert.symbol, alert.target),
+                Style::default().fg(Color::Black).bg(Color::Yellow).add_modifier(Modifier::BOLD),
+            ))
+        } else {
+            let direction = if alert.above { "↑" } else { "↓" };
+            Line::from(Span::styled(
+                format!("Alert set: ${:.2} {} (a: clear)", alert.target, direction),
+                Style::default().fg(Color::Yellow),
+            ))
+        }
+    } else {
+        Line::from(Span::styled("a: Set alert", Style::default().fg(Color::DarkGray)))
+    };
+
     let footer_text = vec![
-        Line::from("Controls:"),
-        Line::from("'b': Back | 's': Search | '←/→': Timeframe | 'l': Live Mode | 'r': Refresh | 'q': Quit"),
+        Line::from("'b': Back | 's': Search | '←/→': Timeframe | 'l': Live Mode | 'r': Refresh | 'a': Alert | 'q': Quit"),
+        alert_line,
     ];
 
     let footer = Paragraph::new(footer_text)

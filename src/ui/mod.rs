@@ -207,12 +207,11 @@ pub struct App {
     pub market_gainers_state: ListState,
     pub market_losers_state: ListState,
     pub market_active_state: ListState,
-    // Price alert
-    pub price_alert: Option<f64>,
-    pub alert_triggered: bool,
-    pub alert_above: Option<bool>, // true = alert when price goes above, false = below
+    // Price alerts
+    pub alerts: Vec<crate::alerts::PriceAlert>,
     pub show_alert_input: bool,
     pub alert_input_buffer: String,
+    pub alert_target_symbol: String,
 }
 
 impl App {
@@ -276,11 +275,10 @@ impl App {
             market_gainers_state: ListState::default(),
             market_losers_state: ListState::default(),
             market_active_state: ListState::default(),
-            price_alert: None,
-            alert_triggered: false,
-            alert_above: None,
+            alerts: crate::alerts::load(),
             show_alert_input: false,
             alert_input_buffer: String::new(),
+            alert_target_symbol: String::new(),
         }
     }
 
@@ -308,33 +306,82 @@ impl App {
         self.loading = false;
     }
 
-    pub fn set_price_alert(&mut self, target: f64) {
-        let current = self.last_live_price.unwrap_or(target);
-        self.alert_above = Some(current < target); // true = waiting for price to go UP to target
-        self.price_alert = Some(target);
-        self.alert_triggered = false;
+    pub fn set_price_alert(&mut self, symbol: String, target: f64, current_price: f64) {
+        self.alerts.retain(|a| a.symbol != symbol);
+        self.alerts.push(crate::alerts::PriceAlert {
+            symbol,
+            target,
+            above: current_price < target,
+            triggered: false,
+        });
+        crate::alerts::save(&self.alerts);
     }
 
-    pub fn clear_price_alert(&mut self) {
-        self.price_alert = None;
-        self.alert_triggered = false;
-        self.alert_above = None;
+    pub fn clear_price_alert(&mut self, symbol: &str) {
+        self.alerts.retain(|a| a.symbol != symbol);
+        crate::alerts::save(&self.alerts);
+    }
+
+    pub fn alert_for_symbol(&self, symbol: &str) -> Option<&crate::alerts::PriceAlert> {
+        self.alerts.iter().find(|a| a.symbol == symbol)
+    }
+
+    /// Check quotes against all pending alerts. Returns (symbol, target) pairs that just triggered.
+    pub fn check_alerts(&mut self, quotes: &HashMap<String, crate::stock::QuoteSnapshot>) -> Vec<(String, f64)> {
+        let mut triggered = Vec::new();
+        let mut save_needed = false;
+
+        for alert in self.alerts.iter_mut() {
+            if alert.triggered { continue; }
+            if let Some(quote) = quotes.get(&alert.symbol) {
+                let crossed = if alert.above {
+                    quote.price >= alert.target
+                } else {
+                    quote.price <= alert.target
+                };
+                if crossed {
+                    alert.triggered = true;
+                    triggered.push((alert.symbol.clone(), alert.target));
+                    save_needed = true;
+                }
+            }
+        }
+
+        if save_needed {
+            crate::alerts::save(&self.alerts);
+        }
+        triggered
+    }
+
+    /// Best available price for a symbol (landing quotes → stock data fallback).
+    pub fn current_price_for(&self, symbol: &str) -> Option<f64> {
+        if let Some(q) = self.landing_quotes.get(symbol) {
+            return Some(q.price);
+        }
+        if let Some(ref data) = self.stock_data {
+            if data.symbol == symbol {
+                return Some(data.current_price);
+            }
+        }
+        None
+    }
+
+    /// Currently highlighted symbol on the landing page.
+    pub fn selected_symbol(&self) -> Option<String> {
+        match self.landing_panel {
+            LandingPanel::Popular => self.popular_list_state
+                .selected()
+                .and_then(|i| self.popular_stocks.get(i))
+                .map(|(sym, _)| sym.to_string()),
+            LandingPanel::Watchlist => self.watchlist_state
+                .selected()
+                .and_then(|i| self.watchlist.get(i))
+                .cloned(),
+        }
     }
 
     pub fn update_live_price(&mut self, price: f64, volume: Option<u64>) {
         let now = Utc::now();
-
-        // Check price alert before updating
-        if let (Some(target), Some(above), false) = (self.price_alert, self.alert_above, self.alert_triggered) {
-            let crossed = if above {
-                price >= target
-            } else {
-                price <= target
-            };
-            if crossed {
-                self.alert_triggered = true;
-            }
-        }
 
         self.last_live_price = Some(price);
         self.ws_last_update = Some(now);
@@ -553,8 +600,13 @@ impl App {
 
         let mut symbols: Vec<&str> = self.popular_stocks.iter().map(|(t, _)| *t).collect();
         let watchlist_syms: Vec<String> = self.watchlist.clone();
+        let alert_syms: Vec<String> = self.alerts.iter()
+            .filter(|a| !a.triggered)
+            .map(|a| a.symbol.clone())
+            .collect();
         let watchlist_refs: Vec<&str> = watchlist_syms.iter().map(|s| s.as_str()).collect();
-        for s in &watchlist_refs {
+        let alert_refs: Vec<&str> = alert_syms.iter().map(|s| s.as_str()).collect();
+        for s in watchlist_refs.iter().chain(alert_refs.iter()) {
             if !symbols.contains(s) {
                 symbols.push(s);
             }
@@ -777,6 +829,8 @@ pub fn render_help(f: &mut Frame, _app: &App){
         ("s", "Search for stock"),
         ("←/→", "Change timeframe / candle interval"),
         ("l", "Enter live mode"),
+        ("a", "Set / clear price alert (any view)"),
+        ("w", "Add to watchlist"),
         ("b", "Back to chart / landing"),
         ("e", "Show error log"),
         ("h", "Toggle this help screen"),
