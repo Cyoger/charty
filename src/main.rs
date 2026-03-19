@@ -231,7 +231,6 @@ async fn handle_input(
 
             if app.input_mode {
                 match key {
-                    KeyCode::Char('q') if app.input_buffer.is_empty() => return true,
                     KeyCode::Enter => {
                         if !app.input_buffer.is_empty() {
                             app.symbol = app.input_buffer.to_uppercase();
