@@ -15,12 +15,23 @@ mod ui;
 mod watchlist;
 mod websocket;
 
-use ui::{App, AppState, LandingPanel, MarketPanel, WebSocketStatus};
+use ui::{App, AppState, Candlestick, LandingPanel, MarketPanel, WebSocketStatus};
 use std::collections::HashMap;
 use crate::stock::QuoteSnapshot;
 use websocket::LivePrice;
 use std::fs::OpenOptions;
 use std::io::Write;
+
+enum AppUpdate {
+    StockData { symbol: String, result: Result<stock::StockData, String> },
+    MarketData {
+        gainers: Vec<stock::MarketMover>,
+        losers: Vec<stock::MarketMover>,
+        active: Vec<stock::MarketMover>,
+    },
+    MarketError(String),
+    HistoricalCandles(Vec<Candlestick>),
+}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -91,12 +102,23 @@ async fn run_app(
     status_tx: mpsc::UnboundedSender<WebSocketStatus>,
     quotes_tx: mpsc::UnboundedSender<HashMap<String, QuoteSnapshot>>,
 ) -> Result<(), io::Error> {
+    let (update_tx, mut update_rx) = mpsc::unbounded_channel::<AppUpdate>();
     let mut ws_task_handle: Option<tokio::task::JoinHandle<()>> = None;
     let mut last_alert_check = std::time::Instant::now();
     const ALERT_CHECK_SECS: u64 = 30;
 
     loop {
         terminal.draw(|f| ui::ui(f, app))?;
+
+        // Apply results from background data fetches
+        while let Ok(update) = update_rx.try_recv() {
+            match update {
+                AppUpdate::StockData { symbol, result } => app.apply_stock_data(&symbol, result),
+                AppUpdate::MarketData { gainers, losers, active } => app.apply_market_data(gainers, losers, active),
+                AppUpdate::MarketError(e) => app.apply_market_error(e),
+                AppUpdate::HistoricalCandles(candles) => app.apply_historical_candles(candles),
+            }
+        }
 
         // Check for WebSocket status updates
         while let Ok(status) = status_rx.try_recv() {
@@ -162,7 +184,7 @@ async fn run_app(
         if event::poll(std::time::Duration::from_millis(100))? {
             if let Event::Key(key) = event::read()? {
                 if key.kind == KeyEventKind::Press {
-                    if handle_input(app, key.code, &mut ws_task_handle, &tx, &status_tx).await {
+                    if handle_input(app, key.code, &mut ws_task_handle, &tx, &status_tx, &update_tx, &quotes_tx).await {
                         // Stop WebSocket before quitting
                         stop_websocket(&mut ws_task_handle, &app.ws_should_stop).await;
                         return Ok(());
@@ -184,12 +206,63 @@ async fn stop_websocket(
     }
 }
 
+fn spawn_stock_fetch(symbol: String, timeframe: stock::TimeFrame, update_tx: mpsc::UnboundedSender<AppUpdate>) {
+    tokio::spawn(async move {
+        let sym = symbol.clone();
+        let result = tokio::task::spawn_blocking(move || {
+            stock::fetch_stock_data(&sym, timeframe).map_err(|e| e.to_string())
+        }).await.unwrap_or_else(|e| Err(e.to_string()));
+        let _ = update_tx.send(AppUpdate::StockData { symbol, result });
+    });
+}
+
+fn spawn_market_fetch(update_tx: mpsc::UnboundedSender<AppUpdate>) {
+    tokio::spawn(async move {
+        let result = tokio::task::spawn_blocking(|| {
+            let gainers = stock::fetch_market_movers("day_gainers", 10).map_err(|e| e.to_string())?;
+            let losers  = stock::fetch_market_movers("day_losers",  10).map_err(|e| e.to_string())?;
+            let active  = stock::fetch_market_movers("most_actives", 10).map_err(|e| e.to_string())?;
+            Ok::<_, String>((gainers, losers, active))
+        }).await.unwrap_or_else(|e| Err(e.to_string()));
+        match result {
+            Ok((gainers, losers, active)) => { let _ = update_tx.send(AppUpdate::MarketData { gainers, losers, active }); }
+            Err(e) => { let _ = update_tx.send(AppUpdate::MarketError(e)); }
+        }
+    });
+}
+
+fn spawn_quotes_fetch(symbols: Vec<String>, quotes_tx: mpsc::UnboundedSender<HashMap<String, QuoteSnapshot>>) {
+    tokio::spawn(async move {
+        let result = tokio::task::spawn_blocking(move || {
+            let session = stock::YahooSession::new().map_err(|e| e.to_string())?;
+            let refs: Vec<&str> = symbols.iter().map(|s| s.as_str()).collect();
+            stock::fetch_batch_quotes(&session, &refs).map_err(|e| e.to_string())
+        }).await.unwrap_or_else(|e| Err(e.to_string()));
+        if let Ok(quotes) = result {
+            let _ = quotes_tx.send(quotes);
+        }
+    });
+}
+
+fn spawn_candles_fetch(symbol: String, interval: String, update_tx: mpsc::UnboundedSender<AppUpdate>) {
+    tokio::spawn(async move {
+        let result = tokio::task::spawn_blocking(move || {
+            stock::fetch_historical_candles(&symbol, &interval).map_err(|e| e.to_string())
+        }).await.unwrap_or_else(|e| Err(e.to_string()));
+        if let Ok(candles) = result {
+            let _ = update_tx.send(AppUpdate::HistoricalCandles(candles));
+        }
+    });
+}
+
 async fn handle_input(
     app: &mut App,
     key: KeyCode,
     ws_task_handle: &mut Option<tokio::task::JoinHandle<()>>,
     tx: &mpsc::UnboundedSender<LivePrice>,
     status_tx: &mpsc::UnboundedSender<WebSocketStatus>,
+    update_tx: &mpsc::UnboundedSender<AppUpdate>,
+    quotes_tx: &mpsc::UnboundedSender<HashMap<String, QuoteSnapshot>>,
 ) -> bool {
     // Alert input popup is modal — handle it before any state-specific logic
     if app.show_alert_input {
@@ -237,9 +310,9 @@ async fn handle_input(
                             app.input_buffer.clear();
                             app.input_mode = false;
 
-                            // Stop existing WebSocket and fetch new data
                             stop_websocket(ws_task_handle, &app.ws_should_stop).await;
                             app.fetch_data();
+                            spawn_stock_fetch(app.symbol.clone(), app.timeframe, update_tx.clone());
                         }
                     }
                     KeyCode::Esc => {
@@ -284,6 +357,10 @@ async fn handle_input(
                             LandingPanel::Popular => app.select_popular(),
                             LandingPanel::Watchlist => app.select_watchlist(),
                         }
+                        if !app.symbol.is_empty() {
+                            app.fetch_data();
+                            spawn_stock_fetch(app.symbol.clone(), app.timeframe, update_tx.clone());
+                        }
                     }
                     KeyCode::Char('d') => {
                         if app.landing_panel == LandingPanel::Watchlist {
@@ -307,9 +384,17 @@ async fn handle_input(
                     KeyCode::Char('m') => {
                         app.state = AppState::Market;
                         app.fetch_market_data();
+                        spawn_market_fetch(update_tx.clone());
                     }
                     KeyCode::Char('r') => {
-                        app.refresh_landing_quotes();
+                        let mut symbols: Vec<String> = app.popular_stocks.iter().map(|(t, _)| t.to_string()).collect();
+                        for s in &app.watchlist {
+                            if !symbols.contains(s) { symbols.push(s.clone()); }
+                        }
+                        for a in app.alerts.iter().filter(|a| !a.triggered) {
+                            if !symbols.contains(&a.symbol) { symbols.push(a.symbol.clone()); }
+                        }
+                        spawn_quotes_fetch(symbols, quotes_tx.clone());
                     }
                     _ => {}
                 }
@@ -324,6 +409,7 @@ async fn handle_input(
                 }
                 KeyCode::Char('r') => {
                     app.fetch_market_data();
+                    spawn_market_fetch(update_tx.clone());
                 }
                 KeyCode::Tab => {
                     app.market_panel = match app.market_panel {
@@ -337,6 +423,10 @@ async fn handle_input(
                 KeyCode::Enter => {
                     stop_websocket(ws_task_handle, &app.ws_should_stop).await;
                     app.select_market();
+                    if !app.symbol.is_empty() {
+                        app.fetch_data();
+                        spawn_stock_fetch(app.symbol.clone(), app.timeframe, update_tx.clone());
+                    }
                 }
                 _ => {}
             }
@@ -390,7 +480,7 @@ async fn handle_input(
                         // Live Candles mode
                         app.show_live_mode_select = false;
                         app.clear_live_data();
-                        app.load_historical_candles(); // Load historical candles first
+                        spawn_candles_fetch(app.symbol.clone(), app.candle_interval.to_string().to_owned(), update_tx.clone());
                         app.live_updates_enabled = true;
                         app.state = AppState::LiveCandles;
 
@@ -465,29 +555,28 @@ async fn handle_input(
                 }
                 KeyCode::Char('r') => {
                     app.fetch_data();
+                    spawn_stock_fetch(app.symbol.clone(), app.timeframe, update_tx.clone());
                     false
                 }
                 KeyCode::Left => {
                     if app.show_candlesticks {
-                        // Change candle interval in candlestick mode
                         app.candle_interval = app.candle_interval.prev();
                         false
                     } else {
-                        // Change timeframe in regular chart mode
                         app.timeframe = app.timeframe.prev();
                         app.fetch_data();
+                        spawn_stock_fetch(app.symbol.clone(), app.timeframe, update_tx.clone());
                         false
                     }
                 }
                 KeyCode::Right => {
                     if app.show_candlesticks {
-                        // Change candle interval in candlestick mode
                         app.candle_interval = app.candle_interval.next();
                         false
                     } else {
-                        // Change timeframe in regular chart mode
                         app.timeframe = app.timeframe.next();
                         app.fetch_data();
+                        spawn_stock_fetch(app.symbol.clone(), app.timeframe, update_tx.clone());
                         false
                     }
                 }
@@ -577,20 +666,18 @@ async fn handle_input(
                     false
                 }
                 KeyCode::Left => {
-                    // Only change interval in LiveCandles mode
                     if matches!(app.state, AppState::LiveCandles) {
                         app.candle_interval = app.candle_interval.prev();
                         app.clear_live_data();
-                        app.load_historical_candles();
+                        spawn_candles_fetch(app.symbol.clone(), app.candle_interval.to_string().to_owned(), update_tx.clone());
                     }
                     false
                 }
                 KeyCode::Right => {
-                    // Only change interval in LiveCandles mode
                     if matches!(app.state, AppState::LiveCandles) {
                         app.candle_interval = app.candle_interval.next();
                         app.clear_live_data();
-                        app.load_historical_candles();
+                        spawn_candles_fetch(app.symbol.clone(), app.candle_interval.to_string().to_owned(), update_tx.clone());
                     }
                     false
                 }

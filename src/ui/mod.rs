@@ -196,7 +196,6 @@ pub struct App {
     pub landing_panel: LandingPanel,
     // Landing quotes
     pub landing_quotes: HashMap<String, crate::stock::QuoteSnapshot>,
-    pub yahoo_session: Option<crate::stock::YahooSession>,
     // Market overview
     pub market_gainers: Vec<crate::stock::MarketMover>,
     pub market_losers: Vec<crate::stock::MarketMover>,
@@ -265,7 +264,6 @@ impl App {
             watchlist_state: ListState::default(),
             landing_panel: LandingPanel::Popular,
             landing_quotes: HashMap::new(),
-            yahoo_session: None,
             market_gainers: Vec::new(),
             market_losers: Vec::new(),
             market_active: Vec::new(),
@@ -284,26 +282,28 @@ impl App {
 
     pub fn fetch_data(&mut self) {
         self.loading = true;
-        match crate::stock::fetch_stock_data(&self.symbol, self.timeframe) {
+        self.state = AppState::Chart;
+    }
+
+    pub fn apply_stock_data(&mut self, symbol: &str, result: Result<StockData, String>) {
+        self.loading = false;
+        if self.symbol != symbol {
+            return; // stale response for a symbol we've since navigated away from
+        }
+        match result {
             Ok(data) => {
                 self.stock_data = Some(data);
                 self.error_message = None;
-                self.state = AppState::Chart;
             }
             Err(e) => {
-                // Log full error for debugging
-                let full_error = format!("Error fetching {}: {}", self.symbol, e);
+                let full_error = format!("Error fetching {}: {}", symbol, e);
                 self.add_error_to_log(full_error);
-
-                // Show clean user-friendly message
                 self.error_message = Some(format!(
                     "Could not load data for {}\n\nCheck symbol or try again later\n\nPress 'e' to view error log",
-                    self.symbol
+                    symbol
                 ));
-                self.state = AppState::Chart;
             }
         }
-        self.loading = false;
     }
 
     pub fn set_price_alert(&mut self, symbol: String, target: f64, current_price: f64) {
@@ -527,7 +527,6 @@ impl App {
     pub fn select_popular(&mut self) {
         if let Some(i) = self.popular_list_state.selected() {
             self.symbol = self.popular_stocks[i].0.to_string();
-            self.fetch_data();
         }
     }
 
@@ -558,7 +557,6 @@ impl App {
         if let Some(i) = self.watchlist_state.selected() {
             if let Some(symbol) = self.watchlist.get(i) {
                 self.symbol = symbol.clone();
-                self.fetch_data();
             }
         }
     }
@@ -589,81 +587,29 @@ impl App {
         self.watchlist_state.select(Some(i));
     }
 
-    pub fn refresh_landing_quotes(&mut self) {
-        // Ensure we have a valid session
-        if self.yahoo_session.is_none() {
-            match crate::stock::YahooSession::new() {
-                Ok(session) => self.yahoo_session = Some(session),
-                Err(_) => return,
-            }
-        }
-
-        let mut symbols: Vec<&str> = self.popular_stocks.iter().map(|(t, _)| *t).collect();
-        let watchlist_syms: Vec<String> = self.watchlist.clone();
-        let alert_syms: Vec<String> = self.alerts.iter()
-            .filter(|a| !a.triggered)
-            .map(|a| a.symbol.clone())
-            .collect();
-        let watchlist_refs: Vec<&str> = watchlist_syms.iter().map(|s| s.as_str()).collect();
-        let alert_refs: Vec<&str> = alert_syms.iter().map(|s| s.as_str()).collect();
-        for s in watchlist_refs.iter().chain(alert_refs.iter()) {
-            if !symbols.contains(s) {
-                symbols.push(s);
-            }
-        }
-
-        if let Some(ref session) = self.yahoo_session {
-            match crate::stock::fetch_batch_quotes(session, &symbols) {
-                Ok(quotes) => self.landing_quotes = quotes,
-                Err(_) => {
-                    // Session may have expired — clear it so next call re-authenticates
-                    self.yahoo_session = None;
-                }
-            }
-        }
-    }
 
     pub fn fetch_market_data(&mut self) {
         self.market_loading = true;
         self.market_error = None;
+    }
 
-        match crate::stock::fetch_market_movers("day_gainers", 10) {
-            Ok(data) => self.market_gainers = data,
-            Err(e) => {
-                self.market_error = Some(format!("Failed to load market data: {}", e));
-            }
-        }
+    pub fn apply_market_data(
+        &mut self,
+        gainers: Vec<crate::stock::MarketMover>,
+        losers: Vec<crate::stock::MarketMover>,
+        active: Vec<crate::stock::MarketMover>,
+    ) {
+        self.market_gainers = gainers;
+        self.market_losers = losers;
+        self.market_active = active;
+        self.market_loading = false;
+        if !self.market_gainers.is_empty() { self.market_gainers_state.select(Some(0)); }
+        if !self.market_losers.is_empty() { self.market_losers_state.select(Some(0)); }
+        if !self.market_active.is_empty() { self.market_active_state.select(Some(0)); }
+    }
 
-        if self.market_error.is_none() {
-            match crate::stock::fetch_market_movers("day_losers", 10) {
-                Ok(data) => self.market_losers = data,
-                Err(e) => {
-                    self.market_error = Some(format!("Failed to load market data: {}", e));
-                }
-            }
-        }
-
-        if self.market_error.is_none() {
-            match crate::stock::fetch_market_movers("most_actives", 10) {
-                Ok(data) => self.market_active = data,
-                Err(e) => {
-                    self.market_error = Some(format!("Failed to load market data: {}", e));
-                }
-            }
-        }
-
-        if self.market_error.is_none() {
-            if !self.market_gainers.is_empty() {
-                self.market_gainers_state.select(Some(0));
-            }
-            if !self.market_losers.is_empty() {
-                self.market_losers_state.select(Some(0));
-            }
-            if !self.market_active.is_empty() {
-                self.market_active_state.select(Some(0));
-            }
-        }
-
+    pub fn apply_market_error(&mut self, e: String) {
+        self.market_error = Some(format!("Failed to load market data: {}", e));
         self.market_loading = false;
     }
 
@@ -717,26 +663,14 @@ impl App {
             };
             if let Some(sym) = symbol {
                 self.symbol = sym;
-                self.fetch_data();
             }
         }
     }
 
-    pub fn load_historical_candles(&mut self) {
-        // Fetch historical candles from Finnhub
-        let resolution = self.candle_interval.to_finnhub_resolution();
-        match crate::stock::fetch_historical_candles(&self.symbol, resolution, 60) {
-            Ok(candles) => {
-                // Clear existing and load historical candles
-                self.live_candles.clear();
-                for candle in candles {
-                    self.live_candles.push_back(candle);
-                }
-            }
-            Err(e) => {
-                // Log error but don't fail - can still show live candles
-                self.add_error_to_log(format!("Could not load historical candles: {}", e));
-            }
+    pub fn apply_historical_candles(&mut self, candles: Vec<Candlestick>) {
+        self.live_candles.clear();
+        for candle in candles {
+            self.live_candles.push_back(candle);
         }
     }
 

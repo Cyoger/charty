@@ -303,83 +303,69 @@ pub fn fetch_market_movers(scr_id: &str, count: usize) -> Result<Vec<MarketMover
     Ok(movers)
 }
 
-// ── Historical candles (Finnhub) ──────────────────────────────────────────────
-
-fn yahoo_to_finnhub_symbol(yahoo_symbol: &str) -> &str {
-    match yahoo_symbol {
-        "^GSPC" => "SPX",
-        "^DJI" => "DJI",
-        "^IXIC" => "IXIC",
-        "^VIX" => "VIX",
-        "BTC-USD" => "BINANCE:BTCUSDT",
-        "ETH-USD" => "BINANCE:ETHUSDT",
-        _ => yahoo_symbol,
-    }
-}
+// ── Historical candles (Yahoo Finance v8) ────────────────────────────────────
 
 pub fn fetch_historical_candles(
     symbol: &str,
-    resolution: &str,
-    count: usize,
+    interval: &str,
 ) -> Result<Vec<crate::ui::Candlestick>, Box<dyn std::error::Error>> {
     use crate::ui::Candlestick;
 
-    let api_key = std::env::var("FINNHUB_API_KEY")
-        .map_err(|_| "FINNHUB_API_KEY not set")?;
-
-    let finnhub_symbol = yahoo_to_finnhub_symbol(symbol);
-
-    let now = Utc::now().timestamp();
-    let seconds_per_candle = match resolution {
-        "1" => 60,
-        "5" => 300,
-        "15" => 900,
-        "30" => 1800,
-        "60" => 3600,
-        _ => 60,
+    // Pick a range wide enough to yield ~60+ candles per interval
+    let range = match interval {
+        "1m" => "1d",
+        "5m" => "1d",
+        "15m" => "5d",
+        "30m" => "5d",
+        "1h" => "1mo",
+        _ => "1d",
     };
-    let from = now - (seconds_per_candle * count as i64);
 
     let url = format!(
-        "https://finnhub.io/api/v1/stock/candle?symbol={}&resolution={}&from={}&to={}&token={}",
-        finnhub_symbol, resolution, from, now, api_key.trim()
+        "https://query1.finance.yahoo.com/v8/finance/chart/{}?interval={}&range={}&includePrePost=false",
+        symbol, interval, range
     );
 
-    let response = ureq::get(&url).call()?;
+    let response = ureq::get(&url)
+        .set("User-Agent", "Mozilla/5.0")
+        .call()?;
     let json: serde_json::Value = response.into_json()?;
 
-    if json["s"].as_str() != Some("ok") {
-        return Err("No candle data available".into());
-    }
+    let chart = &json["chart"]["result"][0];
 
-    let opens = json["o"].as_array().ok_or("No open data")?;
-    let highs = json["h"].as_array().ok_or("No high data")?;
-    let lows = json["l"].as_array().ok_or("No low data")?;
-    let closes = json["c"].as_array().ok_or("No close data")?;
-    let volumes = json["v"].as_array().ok_or("No volume data")?;
-    let timestamps = json["t"].as_array().ok_or("No timestamp data")?;
+    let timestamps = chart["timestamp"]
+        .as_array()
+        .ok_or("No timestamp data")?;
+
+    let quote = &chart["indicators"]["quote"][0];
+    let opens   = quote["open"].as_array().ok_or("No open data")?;
+    let highs   = quote["high"].as_array().ok_or("No high data")?;
+    let lows    = quote["low"].as_array().ok_or("No low data")?;
+    let closes  = quote["close"].as_array().ok_or("No close data")?;
+    let volumes = quote["volume"].as_array().ok_or("No volume data")?;
 
     let mut candles = Vec::new();
 
-    for i in 0..opens.len() {
-        if let (Some(o), Some(h), Some(l), Some(c), Some(v), Some(t)) = (
+    for i in 0..timestamps.len() {
+        if let (Some(t), Some(o), Some(h), Some(l), Some(c)) = (
+            timestamps[i].as_i64(),
             opens[i].as_f64(),
             highs[i].as_f64(),
             lows[i].as_f64(),
             closes[i].as_f64(),
-            volumes[i].as_f64(),
-            timestamps[i].as_i64(),
         ) {
+            let volume = volumes[i].as_u64().unwrap_or(0);
             candles.push(Candlestick {
                 open: o,
                 high: h,
                 low: l,
                 close: c,
-                volume: v as u64,
+                volume,
                 timestamp: DateTime::from_timestamp(t, 0).unwrap_or_else(Utc::now),
                 trade_count: 0,
             });
         }
+        // entries with null OHLC values (e.g. gaps) are skipped
     }
 
     Ok(candles)
