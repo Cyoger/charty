@@ -20,7 +20,7 @@ assets = [
 
 [dependencies]
 ratatui = "0.28"
-crossterm = "0.28"
+crossterm = { version = "0.28", features = ["event-stream"] }
 tokio = { version = "1", features = ["full"] }
 ureq = { version = "2.10", features = ["json", "cookies"] }
 serde = { version = "1.0", features = ["derive"] }

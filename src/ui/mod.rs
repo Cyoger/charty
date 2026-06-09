@@ -113,16 +113,6 @@ impl CandleInterval {
         }
     }
 
-    pub fn to_finnhub_resolution(&self) -> &'static str {
-        match self {
-            CandleInterval::OneMinute => "1",
-            CandleInterval::FiveMinutes => "5",
-            CandleInterval::FifteenMinutes => "15",
-            CandleInterval::ThirtyMinutes => "30",
-            CandleInterval::OneHour => "60",
-        }
-    }
-
     pub fn prev(&self) -> Self {
         match self {
             CandleInterval::OneMinute => CandleInterval::OneHour,
@@ -182,6 +172,8 @@ pub struct App {
     pub update_throttle: UpdateThrottle,
     pub show_error_log: bool,
     pub show_candlesticks: bool,
+    pub show_volume: bool,
+    pub show_sma: bool,
     // Live mode fields
     pub show_live_mode_select: bool,
     pub live_trades: VecDeque<Trade>,
@@ -251,6 +243,8 @@ impl App {
             update_throttle: UpdateThrottle::new(Duration::from_millis(100)), // Faster for live modes
             show_error_log: false,
             show_candlesticks: false,
+            show_volume: false,
+            show_sma: false,
             // Live mode fields
             show_live_mode_select: false,
             live_trades: VecDeque::new(),
@@ -299,7 +293,7 @@ impl App {
                 let full_error = format!("Error fetching {}: {}", symbol, e);
                 self.add_error_to_log(full_error);
                 self.error_message = Some(format!(
-                    "Could not load data for {}\n\nCheck symbol or try again later\n\nPress 'e' to view error log",
+                    "Could not load data for \"{}\"\n\nCheck the symbol and try again\n\n's' to search  'b' to go back  'e' for error details",
                     symbol
                 ));
             }

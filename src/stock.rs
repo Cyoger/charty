@@ -13,6 +13,7 @@ pub struct StockData {
     pub symbol: String,
     pub timestamps: Vec<DateTime<Utc>>,
     pub prices: Vec<f64>,
+    pub volumes: Vec<f64>,
     pub current_price: f64,
     pub change: f64,
     pub change_percent: f64,
@@ -92,8 +93,10 @@ pub struct YahooSession {
 
 impl YahooSession {
     pub fn new() -> Result<Self, Box<dyn std::error::Error>> {
+        let timeout = std::time::Duration::from_secs(10);
         let agent = ureq::AgentBuilder::new()
             .cookie_store(cookie_store::CookieStore::default())
+            .timeout(timeout)
             .build();
 
         // Hit homepage to populate cookie jar
@@ -212,6 +215,7 @@ pub fn fetch_stock_data(symbol: &str, timeframe: TimeFrame) -> Result<StockData,
 
     let response = ureq::get(&url)
         .set("User-Agent", "Mozilla/5.0")
+        .timeout(std::time::Duration::from_secs(10))
         .call()?;
     let json: serde_json::Value = response.into_json()?;
 
@@ -222,30 +226,37 @@ pub fn fetch_stock_data(symbol: &str, timeframe: TimeFrame) -> Result<StockData,
         .map(MarketState::from_str)
         .unwrap_or(MarketState::Closed);
 
-    let timestamps: Vec<DateTime<Utc>> = chart["timestamp"]
-        .as_array()
-        .ok_or("No timestamp data")?
-        .iter()
-        .filter_map(|v| v.as_i64())
-        .map(|ts| DateTime::from_timestamp(ts, 0).unwrap())
-        .collect();
+    let raw_timestamps = chart["timestamp"].as_array().ok_or("No timestamp data")?;
+    let quote = &chart["indicators"]["quote"][0];
+    let raw_closes  = quote["close"].as_array().ok_or("No close data")?;
+    let raw_volumes = quote["volume"].as_array();
 
-    let prices: Vec<f64> = chart["indicators"]["quote"][0]["close"]
-        .as_array()
-        .ok_or("No close data")?
-        .iter()
-        .filter_map(|v| v.as_f64())
-        .collect();
+    let mut timestamps = Vec::new();
+    let mut prices    = Vec::new();
+    let mut volumes   = Vec::new();
+
+    for i in 0..raw_closes.len().min(raw_timestamps.len()) {
+        if let (Some(close), Some(ts)) = (raw_closes[i].as_f64(), raw_timestamps[i].as_i64()) {
+            timestamps.push(DateTime::from_timestamp(ts, 0).unwrap());
+            prices.push(close);
+            let vol = raw_volumes
+                .and_then(|v| v.get(i))
+                .and_then(|v| v.as_f64())
+                .unwrap_or(0.0);
+            volumes.push(vol);
+        }
+    }
 
     let current_price = *prices.last().ok_or("No price data")?;
-    let first_price = *prices.first().ok_or("No price data")?;
-    let change = current_price - first_price;
+    let first_price   = *prices.first().ok_or("No price data")?;
+    let change         = current_price - first_price;
     let change_percent = (change / first_price) * 100.0;
 
     Ok(StockData {
         symbol: symbol.to_string(),
         timestamps,
         prices,
+        volumes,
         current_price,
         change,
         change_percent,
@@ -276,6 +287,7 @@ pub fn fetch_market_movers(scr_id: &str, count: usize) -> Result<Vec<MarketMover
 
     let response = ureq::get(&url)
         .set("User-Agent", "Mozilla/5.0")
+        .timeout(std::time::Duration::from_secs(10))
         .call()?;
     let json: serde_json::Value = response.into_json()?;
 
@@ -328,6 +340,7 @@ pub fn fetch_historical_candles(
 
     let response = ureq::get(&url)
         .set("User-Agent", "Mozilla/5.0")
+        .timeout(std::time::Duration::from_secs(10))
         .call()?;
     let json: serde_json::Value = response.into_json()?;
 
