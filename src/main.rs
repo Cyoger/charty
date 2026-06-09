@@ -226,6 +226,7 @@ async fn run_app(
                     needs_redraw = true;
                 }
             }
+            Ok(Ok(Some(Event::Resize(_, _)))) => { needs_redraw = true; }
             Ok(Ok(_)) => {}
             Ok(Err(e)) => return Err(e),
             Err(_) => {}
