@@ -86,7 +86,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     terminal.show_cursor()?;
 
     if let Err(err) = res {
-        eprintln!("Error: {:?}", err);
+        let msg = format!("Fatal error: {:?}", err);
+        eprintln!("{}", msg);
+        let _ = writeln!(log_file, "{}", msg);
     }
 
     Ok(())
@@ -106,9 +108,13 @@ async fn run_app(
     let mut ws_task_handle: Option<tokio::task::JoinHandle<()>> = None;
     let mut last_alert_check = std::time::Instant::now();
     const ALERT_CHECK_SECS: u64 = 30;
+    let mut needs_redraw = true;
 
     loop {
-        terminal.draw(|f| ui::ui(f, app))?;
+        if needs_redraw {
+            terminal.draw(|f| ui::ui(f, app))?;
+            needs_redraw = false;
+        }
 
         // Apply results from background data fetches
         while let Ok(update) = update_rx.try_recv() {
@@ -118,6 +124,7 @@ async fn run_app(
                 AppUpdate::MarketError(e) => app.apply_market_error(e),
                 AppUpdate::HistoricalCandles(candles) => app.apply_historical_candles(candles),
             }
+            needs_redraw = true;
         }
 
         // Check for WebSocket status updates
@@ -126,6 +133,7 @@ async fn run_app(
                 app.add_error_to_log(message.clone());
             }
             app.ws_status = status;
+            needs_redraw = true;
         }
 
         // Check for background quote updates; run alert checks on arrival
@@ -139,6 +147,7 @@ async fn run_app(
                     .spawn();
             }
             app.landing_quotes.extend(quotes.into_iter());
+            needs_redraw = true;
         }
 
         // Periodically fetch prices for any pending alerts
@@ -168,7 +177,6 @@ async fn run_app(
         }
 
         // Check for live price updates with throttling
-        // Drain all pending messages to prevent unbounded queueing
         let mut latest_price = None;
         while let Ok(live_price) = rx.try_recv() {
             latest_price = Some(live_price);
@@ -177,20 +185,37 @@ async fn run_app(
         if let Some(live_price) = latest_price {
             if app.live_updates_enabled && app.update_throttle.should_update() {
                 app.update_live_price(live_price.price, live_price.volume);
+                needs_redraw = true;
             }
         }
 
-        // Check for keyboard input
-        if event::poll(std::time::Duration::from_millis(100))? {
-            if let Event::Key(key) = event::read()? {
-                if key.kind == KeyEventKind::Press {
-                    if handle_input(app, key.code, &mut ws_task_handle, &tx, &status_tx, &update_tx, &quotes_tx).await {
-                        // Stop WebSocket before quitting
-                        stop_websocket(&mut ws_task_handle, &app.ws_should_stop).await;
-                        return Ok(());
-                    }
+        // Poll for a key event on a dedicated thread so the tokio runtime
+        // stays free. Times out after 50ms so live mode still gets periodic redraws.
+        let poll_result = tokio::task::spawn_blocking(|| -> io::Result<Option<Event>> {
+            if event::poll(std::time::Duration::from_millis(50))? {
+                Ok(Some(event::read()?))
+            } else {
+                Ok(None)
+            }
+        }).await;
+
+        match poll_result {
+            Ok(Ok(Some(Event::Key(key)))) if key.kind == KeyEventKind::Press => {
+                let quit = handle_input(app, key.code, &mut ws_task_handle, &tx, &status_tx, &update_tx, &quotes_tx).await;
+                needs_redraw = true;
+                if quit {
+                    stop_websocket(&mut ws_task_handle, &app.ws_should_stop).await;
+                    return Ok(());
                 }
             }
+            Ok(Ok(None)) => {
+                if app.live_updates_enabled {
+                    needs_redraw = true;
+                }
+            }
+            Ok(Ok(_)) => {}
+            Ok(Err(e)) => return Err(e),
+            Err(_) => {}
         }
     }
 }
@@ -200,7 +225,6 @@ async fn stop_websocket(
     should_stop: &Arc<Mutex<bool>>,
 ) {
     *should_stop.lock().await = true;
-    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
     if let Some(handle) = ws_task_handle.take() {
         handle.abort();
     }
@@ -264,6 +288,12 @@ async fn handle_input(
     update_tx: &mpsc::UnboundedSender<AppUpdate>,
     quotes_tx: &mpsc::UnboundedSender<HashMap<String, QuoteSnapshot>>,
 ) -> bool {
+    // Normalize char keys to lowercase so Caps Lock doesn't break shortcuts.
+    let key = match key {
+        KeyCode::Char(c) => KeyCode::Char(c.to_ascii_lowercase()),
+        other => other,
+    };
+
     // Alert input popup is modal — handle it before any state-specific logic
     if app.show_alert_input {
         match key {
@@ -294,12 +324,13 @@ async fn handle_input(
             // Handle help popup first
             if app.show_help {
                 match key {
+                    KeyCode::Char('q') => return true,
                     KeyCode::Char('h') | KeyCode::Esc => {
                         app.show_help = false;
-                        return false;
                     }
-                    _ => return false,
+                    _ => {}
                 }
+                return false;
             }
 
             if app.input_mode {
@@ -436,22 +467,24 @@ async fn handle_input(
             // Handle popups first
             if app.show_error_log {
                 match key {
-                    KeyCode::Esc => {
+                    KeyCode::Char('q') => return true,
+                    KeyCode::Char('e') | KeyCode::Esc => {
                         app.show_error_log = false;
-                        return false;
                     }
-                    _ => return false,
+                    _ => {}
                 }
+                return false;
             }
 
             if app.show_help {
-                match key { 
+                match key {
+                    KeyCode::Char('q') => return true,
                     KeyCode::Char('h') | KeyCode::Esc => {
                         app.show_help = false;
-                        return false;
                     }
-                    _ => return false,
+                    _ => {}
                 }
+                return false;
             }
 
             if app.show_live_mode_select {
@@ -553,6 +586,14 @@ async fn handle_input(
                     }
                     false
                 }
+                KeyCode::Char('v') => {
+                    app.show_volume = !app.show_volume;
+                    false
+                }
+                KeyCode::Char('i') => {
+                    app.show_sma = !app.show_sma;
+                    false
+                }
                 KeyCode::Char('r') => {
                     app.fetch_data();
                     spawn_stock_fetch(app.symbol.clone(), app.timeframe, update_tx.clone());
@@ -587,22 +628,24 @@ async fn handle_input(
             // Handle popups first
             if app.show_help {
                 match key {
+                    KeyCode::Char('q') => return true,
                     KeyCode::Char('h') | KeyCode::Esc => {
                         app.show_help = false;
-                        return false;
                     }
-                    _ => return false,
+                    _ => {}
                 }
+                return false;
             }
 
             if app.show_error_log {
                 match key {
-                    KeyCode::Esc => {
+                    KeyCode::Char('q') => return true,
+                    KeyCode::Char('e') | KeyCode::Esc => {
                         app.show_error_log = false;
-                        return false;
                     }
-                    _ => return false,
+                    _ => {}
                 }
+                return false;
             }
 
             if app.show_live_mode_select {
