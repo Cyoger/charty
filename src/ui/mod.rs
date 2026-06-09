@@ -285,7 +285,13 @@ impl App {
             return; // stale response for a symbol we've since navigated away from
         }
         match result {
-            Ok(data) => {
+            Ok(mut data) => {
+                // Prefer the market state from the live quote API (more reliable than chart meta)
+                crate::stock::log_debug(&format!("[apply_stock_data] {} chart market_state={:?}, landing_quotes has entry={}", symbol, data.market_state, self.landing_quotes.contains_key(symbol)));
+                if let Some(q) = self.landing_quotes.get(symbol) {
+                    crate::stock::log_debug(&format!("[apply_stock_data] {} overriding with quote market_state={:?}", symbol, q.market_state));
+                    data.market_state = q.market_state.clone();
+                }
                 self.stock_data = Some(data);
                 self.error_message = None;
             }

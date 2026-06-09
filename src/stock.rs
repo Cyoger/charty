@@ -1,6 +1,19 @@
 use chrono::{DateTime, Utc};
 use std::collections::{HashMap, VecDeque};
 
+#[cfg(debug_assertions)]
+pub fn log_debug(msg: &str) {
+    use std::io::Write;
+    use std::fs::OpenOptions;
+    if let Ok(mut f) = OpenOptions::new().create(true).append(true).open("debug.log") {
+        let _ = writeln!(f, "{}", msg);
+    }
+}
+
+#[cfg(not(debug_assertions))]
+#[inline(always)]
+pub fn log_debug(_msg: &str) {}
+
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub struct LiveTick {
@@ -102,18 +115,27 @@ impl YahooSession {
         // Hit homepage to populate cookie jar
         let _ = agent
             .get("https://finance.yahoo.com/")
-            .set("User-Agent", "Mozilla/5.0")
+            .set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36")
+            .set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+            .set("Accept-Language", "en-US,en;q=0.5")
             .call();
 
-        let crumb = agent
-            .get("https://query1.finance.yahoo.com/v1/test/getcrumb")
-            .set("User-Agent", "Mozilla/5.0")
-            .call()?
-            .into_string()?;
+        // Try both query1 and query2 hosts for the crumb
+        let crumb_result = ["https://query1.finance.yahoo.com/v1/test/getcrumb",
+                            "https://query2.finance.yahoo.com/v1/test/getcrumb"]
+            .iter()
+            .find_map(|url| {
+                agent.get(url)
+                    .set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36")
+                    .set("Accept", "*/*")
+                    .call()
+                    .ok()
+                    .and_then(|r| r.into_string().ok())
+                    .filter(|s| !s.is_empty() && !s.contains('{'))
+            });
 
-        if crumb.contains('{') {
-            return Err("Failed to get crumb (auth rejected)".into());
-        }
+        let crumb = crumb_result.ok_or("Failed to get crumb from all endpoints")?;
+        log_debug(&format!("[session] crumb obtained: {:?}", &crumb[..crumb.len().min(80)]));
 
         Ok(Self { agent, crumb })
     }
@@ -184,10 +206,9 @@ pub fn fetch_batch_quotes(
             q["regularMarketPrice"].as_f64(),
             q["regularMarketChangePercent"].as_f64(),
         ) {
-            let state = q["marketState"]
-                .as_str()
-                .map(MarketState::from_str)
-                .unwrap_or(MarketState::Closed);
+            let raw_state = q["marketState"].as_str().unwrap_or("<missing>");
+            log_debug(&format!("[quote API] {} marketState={:?}", sym, raw_state));
+            let state = MarketState::from_str(raw_state);
 
             map.insert(sym.to_string(), QuoteSnapshot {
                 price,
@@ -221,10 +242,26 @@ pub fn fetch_stock_data(symbol: &str, timeframe: TimeFrame) -> Result<StockData,
 
     let chart = &json["chart"]["result"][0];
 
-    let market_state = chart["meta"]["marketState"]
-        .as_str()
-        .map(MarketState::from_str)
-        .unwrap_or(MarketState::Closed);
+    let market_state = {
+        let now = Utc::now().timestamp();
+        let tp = &chart["meta"]["currentTradingPeriod"];
+        let reg_start = tp["regular"]["start"].as_i64().unwrap_or(0);
+        let reg_end   = tp["regular"]["end"].as_i64().unwrap_or(0);
+        let pre_start = tp["pre"]["start"].as_i64().unwrap_or(0);
+        let pre_end   = tp["pre"]["end"].as_i64().unwrap_or(0);
+        let post_start = tp["post"]["start"].as_i64().unwrap_or(0);
+        let post_end   = tp["post"]["end"].as_i64().unwrap_or(0);
+        log_debug(&format!("[chart API] {} now={} reg={}-{} pre={}-{} post={}-{}", symbol, now, reg_start, reg_end, pre_start, pre_end, post_start, post_end));
+        if reg_start > 0 && now >= reg_start && now < reg_end {
+            MarketState::Regular
+        } else if pre_start > 0 && now >= pre_start && now < pre_end {
+            MarketState::Pre
+        } else if post_start > 0 && now >= post_start && now < post_end {
+            MarketState::Post
+        } else {
+            MarketState::Closed
+        }
+    };
 
     let raw_timestamps = chart["timestamp"].as_array().ok_or("No timestamp data")?;
     let quote = &chart["indicators"]["quote"][0];
