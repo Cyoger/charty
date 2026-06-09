@@ -17,10 +17,8 @@ mod websocket;
 
 use ui::{App, AppState, Candlestick, LandingPanel, MarketPanel, WebSocketStatus};
 use std::collections::HashMap;
-use crate::stock::QuoteSnapshot;
+use crate::stock::{QuoteSnapshot, log_debug};
 use websocket::LivePrice;
-use std::fs::OpenOptions;
-use std::io::Write;
 
 enum AppUpdate {
     StockData { symbol: String, result: Result<stock::StockData, String> },
@@ -33,16 +31,14 @@ enum AppUpdate {
     HistoricalCandles(Vec<Candlestick>),
 }
 
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     dotenv::dotenv().ok();
-    let mut log_file = OpenOptions::new()
-    .create(true)
-    .append(true)
-    .open("debug.log")?;
-
-    writeln!(log_file, "Starting app...")?;
+    #[cfg(debug_assertions)]
+    { let _ = std::fs::write("debug.log", ""); }
+    log_debug("=== charty started ===");
 
     let mut app = App::new();
 
@@ -62,11 +58,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     ];
                     crate::stock::fetch_batch_quotes(&session, &syms).ok()
                 }
-                Err(_) => None,
+                Err(e) => {
+                    log_debug(&format!("[session] init failed: {}", e));
+                    None
+                }
             }
         }).await;
         if let Ok(Some(quotes)) = result {
+            log_debug(&format!("[session] initial quote fetch succeeded with {} symbols", quotes.len()));
             let _ = quotes_tx_init.send(quotes);
+        } else {
+            log_debug("[session] initial quote fetch produced no results");
         }
     });
 
@@ -88,7 +90,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Err(err) = res {
         let msg = format!("Fatal error: {:?}", err);
         eprintln!("{}", msg);
-        let _ = writeln!(log_file, "{}", msg);
+        log_debug(&msg);
     }
 
     Ok(())
@@ -147,6 +149,17 @@ async fn run_app(
                     .spawn();
             }
             app.landing_quotes.extend(quotes.into_iter());
+            // Sync market_state into stock_data from the fresh quote
+            let updated_state = app.stock_data.as_ref()
+                .and_then(|d| app.landing_quotes.get(&d.symbol))
+                .map(|q| q.market_state.clone());
+            if let (Some(data), Some(state)) = (&mut app.stock_data, updated_state) {
+                log_debug(&format!("[quote sync] {} market_state -> {:?}", data.symbol, state));
+                data.market_state = state;
+            } else {
+                let sym = app.stock_data.as_ref().map(|d| d.symbol.as_str()).unwrap_or("<none>");
+                log_debug(&format!("[quote sync] no update for stock_data symbol={}", sym));
+            }
             needs_redraw = true;
         }
 
@@ -344,6 +357,7 @@ async fn handle_input(
                             stop_websocket(ws_task_handle, &app.ws_should_stop).await;
                             app.fetch_data();
                             spawn_stock_fetch(app.symbol.clone(), app.timeframe, update_tx.clone());
+                            spawn_quotes_fetch(vec![app.symbol.clone()], quotes_tx.clone());
                         }
                     }
                     KeyCode::Esc => {
@@ -391,6 +405,7 @@ async fn handle_input(
                         if !app.symbol.is_empty() {
                             app.fetch_data();
                             spawn_stock_fetch(app.symbol.clone(), app.timeframe, update_tx.clone());
+                            spawn_quotes_fetch(vec![app.symbol.clone()], quotes_tx.clone());
                         }
                     }
                     KeyCode::Char('d') => {
@@ -457,6 +472,7 @@ async fn handle_input(
                     if !app.symbol.is_empty() {
                         app.fetch_data();
                         spawn_stock_fetch(app.symbol.clone(), app.timeframe, update_tx.clone());
+                        spawn_quotes_fetch(vec![app.symbol.clone()], quotes_tx.clone());
                     }
                 }
                 _ => {}
@@ -597,6 +613,7 @@ async fn handle_input(
                 KeyCode::Char('r') => {
                     app.fetch_data();
                     spawn_stock_fetch(app.symbol.clone(), app.timeframe, update_tx.clone());
+                    spawn_quotes_fetch(vec![app.symbol.clone()], quotes_tx.clone());
                     false
                 }
                 KeyCode::Left => {
