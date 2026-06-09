@@ -370,37 +370,54 @@ fn render_volume_bars(f: &mut Frame, app: &App, area: Rect, left_offset: u16) {
     f.render_widget(Paragraph::new(lines), inner);
 }
 
+fn key_span(k: &'static str) -> Span<'static> {
+    Span::styled(k, Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
+}
+
 fn render_footer(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
     let alert_line = if let Some(alert) = app.alert_for_symbol(&app.symbol) {
         if alert.triggered {
             Line::from(Span::styled(
-                format!("⚡ ALERT: {} crossed ${:.2} — press 'a' to clear", alert.symbol, alert.target),
+                format!("⚡ {} crossed ${:.2} — a to clear", alert.symbol, alert.target),
                 Style::default().fg(Color::Black).bg(Color::Yellow).add_modifier(Modifier::BOLD),
             ))
         } else {
             let direction = if alert.above { "↑" } else { "↓" };
             Line::from(Span::styled(
-                format!("Alert set: ${:.2} {} (a: clear)", alert.target, direction),
+                format!("Alert: ${:.2} {}  (a: clear)", alert.target, direction),
                 Style::default().fg(Color::Yellow),
             ))
         }
     } else {
-        Line::from(Span::styled("a: Set alert", Style::default().fg(Color::DarkGray)))
+        Line::from(Span::styled("No alert set", Style::default().fg(Color::DarkGray)))
     };
 
-    let vol_indicator = if app.show_volume { "[v:VOL]" } else { "v:VOL" };
-    let sma_indicator = if app.show_sma    { "[i:SMA]" } else { "i:SMA" };
+    let (vol_key, vol_style) = if app.show_volume {
+        ("v", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD | Modifier::REVERSED))
+    } else {
+        ("v", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
+    };
+    let (sma_key, sma_style) = if app.show_sma {
+        ("i", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD | Modifier::REVERSED))
+    } else {
+        ("i", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
+    };
 
-    let footer_text = vec![
-        Line::from(format!(
-            "'b':Back | 's':Search | '←/→':Timeframe | 'l':Live | 'r':Refresh | {} | {} | 'a':Alert | 'q':Quit",
-            vol_indicator, sma_indicator
-        )),
-        alert_line,
-    ];
+    let controls = Line::from(vec![
+        key_span("←/→"), Span::raw(" Timeframe   "),
+        key_span("l"),   Span::raw(" Live   "),
+        key_span("w"),   Span::raw(" Watchlist   "),
+        key_span("a"),   Span::raw(" Alert   "),
+        key_span("r"),   Span::raw(" Refresh   "),
+        Span::styled(vol_key, vol_style), Span::raw(" Vol   "),
+        Span::styled(sma_key, sma_style), Span::raw(" SMA   "),
+        key_span("s"),   Span::raw(" Search   "),
+        key_span("b"),   Span::raw(" Back   "),
+        key_span("q"),   Span::raw(" Quit"),
+    ]);
 
-    let footer = Paragraph::new(footer_text)
-        .block(Block::default().borders(Borders::ALL).title("Controls"));
+    let footer = Paragraph::new(vec![controls, alert_line])
+        .block(Block::default().borders(Borders::ALL));
     f.render_widget(footer, area);
 }
 

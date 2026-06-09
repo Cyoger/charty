@@ -232,16 +232,31 @@ pub fn render_landing(f: &mut Frame, app: &App) {
     }
 
     // Footer
-    let footer_text = if app.input_mode {
-        "Enter: Confirm | Esc: Cancel"
+    let footer_line = if app.input_mode {
+        Line::from(vec![
+            key_span("Enter"),  Span::raw(" Confirm   "),
+            key_span("Esc"),    Span::raw(" Cancel"),
+        ])
     } else {
-        "↑/↓: Navigate | Enter: Select | Tab: Switch | s: Search | a: Alert | m: Market | r: Refresh | d: Remove | q: Quit"
+        Line::from(vec![
+            key_span("Enter"), Span::raw(" Select   "),
+            key_span("Tab"),   Span::raw(" Switch Panel   "),
+            key_span("s"),     Span::raw(" Search   "),
+            key_span("m"),     Span::raw(" Market   "),
+            key_span("a"),     Span::raw(" Alert   "),
+            key_span("r"),     Span::raw(" Refresh   "),
+            key_span("q"),     Span::raw(" Quit"),
+        ])
     };
 
-    let footer = Paragraph::new(footer_text)
-        .block(Block::default().borders(Borders::ALL).title("Controls"))
+    let footer = Paragraph::new(footer_line)
+        .block(Block::default().borders(Borders::ALL))
         .alignment(Alignment::Center);
     f.render_widget(footer, chunks[2]);
+}
+
+fn key_span(k: &'static str) -> Span<'static> {
+    Span::styled(k, Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
 }
 
 fn truncate(s: &str, max: usize) -> &str {
