@@ -8,7 +8,7 @@ use ratatui::{
 
 use chrono::{Utc, Local};
 
-use super::{App, WebSocketStatus, Candlestick};
+use super::{App, WebSocketStatus, Candlestick, render_nav};
 
 pub fn render_live_ticker(f: &mut Frame, app: &App) {
     let chunks = Layout::default()
@@ -237,10 +237,7 @@ pub fn render_alert_input(f: &mut Frame, app: &App) {
 }
 
 fn render_live_footer(f: &mut Frame, area: ratatui::layout::Rect) {
-    let footer = Paragraph::new("'b': Back | 'l': Switch | 'h': Help | 'e': Errors | 'q': Quit")
-        .alignment(Alignment::Center)
-        .block(Block::default().borders(Borders::ALL).title("Controls"));
-    f.render_widget(footer, area);
+    render_nav(f, area, &[("b", "Back"), ("l", "Switch"), ("h", "Help"), ("e", "Errors"), ("q", "Quit")]);
 }
 
 pub fn render_live_mode_select(f: &mut Frame) {
@@ -292,28 +289,30 @@ pub fn render_live_mode_select(f: &mut Frame) {
 }
 
 fn render_candle_footer(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(3), Constraint::Length(2)])
+        .split(area);
+
+    render_nav(f, chunks[0], &[
+        ("←/→", "Interval"), ("b", "Back"), ("l", "Switch"), ("h", "Help"), ("e", "Errors"), ("q", "Quit")
+    ]);
+
     let ohlc_line = if let Some(ref candle) = app.current_candle {
         Line::from(vec![
-            Span::styled("Current: ", Style::default().fg(Color::Gray)),
-            Span::styled(format!("O:{:.2} ", candle.open), Style::default().fg(Color::White)),
-            Span::styled(format!("H:{:.2} ", candle.high), Style::default().fg(Color::Green)),
-            Span::styled(format!("L:{:.2} ", candle.low), Style::default().fg(Color::Red)),
-            Span::styled(format!("C:{:.2} ", candle.close), Style::default().fg(Color::Cyan)),
-            Span::styled(format!("Ticks:{}", candle.trade_count), Style::default().fg(Color::DarkGray)),
+            Span::styled("  O:", Style::default().fg(Color::Gray)),
+            Span::styled(format!("{:.2} ", candle.open), Style::default().fg(Color::White)),
+            Span::styled("H:", Style::default().fg(Color::Gray)),
+            Span::styled(format!("{:.2} ", candle.high), Style::default().fg(Color::Green)),
+            Span::styled("L:", Style::default().fg(Color::Gray)),
+            Span::styled(format!("{:.2} ", candle.low), Style::default().fg(Color::Red)),
+            Span::styled("C:", Style::default().fg(Color::Gray)),
+            Span::styled(format!("{:.2}", candle.close), Style::default().fg(Color::Cyan)),
         ])
     } else {
-        Line::from(Span::styled("Waiting for candle data...", Style::default().fg(Color::Gray)))
+        Line::from(Span::styled("  Waiting for candle data...", Style::default().fg(Color::Gray)))
     };
-
-    let footer_text = vec![
-        ohlc_line,
-        Line::from(""),
-        Line::from("'←/→': Interval | 'b': Back | 'l': Switch | 'h': Help | 'e': Errors | 'q': Quit"),
-    ];
-
-    let footer = Paragraph::new(footer_text)
-        .block(Block::default().borders(Borders::ALL).title("Controls"));
-    f.render_widget(footer, area);
+    f.render_widget(Paragraph::new(ohlc_line), chunks[1]);
 }
 
 fn render_candlestick_chart(f: &mut Frame, area: ratatui::layout::Rect, candles: &[&Candlestick], has_current: bool) {

@@ -8,7 +8,7 @@ use ratatui::{
 };
 use chrono::{DateTime, Utc, Local};
 
-use super::{App, Candlestick};
+use super::{App, Candlestick, nav_key};
 use crate::stock::{TimeFrame, MarketState};
 
 pub fn render_chart_view(f: &mut Frame, app: &App) {
@@ -322,14 +322,8 @@ fn render_volume_bars(f: &mut Frame, app: &App, area: Rect, left_offset: u16) {
     let n = data.prices.len().min(data.volumes.len());
     if n == 0 { return; }
 
-    // Use 95th-percentile as the scale ceiling so a single outlier spike
-    // (e.g. market-open bar on intraday data) doesn't flatten everything else.
-    // Bars above the ceiling are simply capped at full height.
-    let mut nonzero: Vec<f64> = data.volumes.iter().cloned().filter(|&v| v > 0.0).collect();
-    if nonzero.is_empty() { return; }
-    nonzero.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    let p95_idx = ((nonzero.len() - 1) as f64 * 0.95) as usize;
-    let scale_vol = nonzero[p95_idx];
+    let scale_vol = data.volumes.iter().cloned().fold(0.0f64, f64::max);
+    if scale_vol == 0.0 { return; }
 
     // Mirror ratatui's x-axis mapping: data index i → pixel i*(width-1)/(n-1)
     // so bar at column col uses data index col*(n-1)/(width-1)
@@ -356,12 +350,27 @@ fn render_volume_bars(f: &mut Frame, app: &App, area: Rect, left_offset: u16) {
             Span::styled("│", Style::default().fg(Color::DarkGray)),
         ];
         for &(vol, is_up) in &bars {
-            let filled_rows = ((vol / scale_vol) * bar_height as f64).min(bar_height as f64) as usize;
-            if from_bottom < filled_rows {
-                let color = if is_up { Color::Green } else { Color::Red };
-                spans.push(Span::styled("█", Style::default().fg(color)));
+            // Compute height in eighths for sub-row precision
+            let total_eighths = ((vol / scale_vol) * bar_height as f64 * 8.0) as usize;
+            let full_rows     = total_eighths / 8;
+            let partial       = total_eighths % 8;
+            let color = if is_up { Color::Green } else { Color::Red };
+
+            let ch: &'static str = if from_bottom < full_rows {
+                "█"
+            } else if from_bottom == full_rows && partial > 0 {
+                match partial {
+                    1 => "▁", 2 => "▂", 3 => "▃", 4 => "▄",
+                    5 => "▅", 6 => "▆", 7 => "▇", _ => " ",
+                }
             } else {
+                " "
+            };
+
+            if ch == " " {
                 spans.push(Span::raw(" "));
+            } else {
+                spans.push(Span::styled(ch, Style::default().fg(color)));
             }
         }
         lines.push(Line::from(spans));
@@ -370,55 +379,61 @@ fn render_volume_bars(f: &mut Frame, app: &App, area: Rect, left_offset: u16) {
     f.render_widget(Paragraph::new(lines), inner);
 }
 
-fn key_span(k: &'static str) -> Span<'static> {
-    Span::styled(k, Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
-}
-
 fn render_footer(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
+    use ratatui::layout::{Constraint, Direction, Layout};
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(3), Constraint::Length(2)])
+        .split(area);
+
+    // Row 1 — shared nav bar with toggle indicators for v/i
+    let vol_style = if app.show_volume {
+        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD | Modifier::REVERSED)
+    } else {
+        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+    };
+    let sma_style = if app.show_sma {
+        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD | Modifier::REVERSED)
+    } else {
+        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+    };
+
+    let nav = Line::from(vec![
+        nav_key("←/→"), Span::raw(" Timeframe   "),
+        nav_key("l"),   Span::raw(" Live   "),
+        nav_key("w"),   Span::raw(" Watchlist   "),
+        nav_key("a"),   Span::raw(" Alert   "),
+        nav_key("r"),   Span::raw(" Refresh   "),
+        Span::styled("v", vol_style), Span::raw(" Vol   "),
+        Span::styled("i", sma_style), Span::raw(" SMA   "),
+        nav_key("s"),   Span::raw(" Search   "),
+        nav_key("b"),   Span::raw(" Back   "),
+        nav_key("q"),   Span::raw(" Quit"),
+    ]);
+    let nav_bar = Paragraph::new(nav)
+        .block(Block::default().borders(Borders::ALL))
+        .alignment(Alignment::Center);
+    f.render_widget(nav_bar, chunks[0]);
+
+    // Row 2 — alert status
     let alert_line = if let Some(alert) = app.alert_for_symbol(&app.symbol) {
         if alert.triggered {
             Line::from(Span::styled(
-                format!("⚡ {} crossed ${:.2} — a to clear", alert.symbol, alert.target),
+                format!("  ⚡ {} crossed ${:.2} — press a to clear", alert.symbol, alert.target),
                 Style::default().fg(Color::Black).bg(Color::Yellow).add_modifier(Modifier::BOLD),
             ))
         } else {
             let direction = if alert.above { "↑" } else { "↓" };
             Line::from(Span::styled(
-                format!("Alert: ${:.2} {}  (a: clear)", alert.target, direction),
+                format!("  Alert: ${:.2} {}  (a: clear)", alert.target, direction),
                 Style::default().fg(Color::Yellow),
             ))
         }
     } else {
-        Line::from(Span::styled("No alert set", Style::default().fg(Color::DarkGray)))
+        Line::from(Span::styled("  No alert set", Style::default().fg(Color::DarkGray)))
     };
-
-    let (vol_key, vol_style) = if app.show_volume {
-        ("v", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD | Modifier::REVERSED))
-    } else {
-        ("v", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
-    };
-    let (sma_key, sma_style) = if app.show_sma {
-        ("i", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD | Modifier::REVERSED))
-    } else {
-        ("i", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
-    };
-
-    let controls = Line::from(vec![
-        key_span("←/→"), Span::raw(" Timeframe   "),
-        key_span("l"),   Span::raw(" Live   "),
-        key_span("w"),   Span::raw(" Watchlist   "),
-        key_span("a"),   Span::raw(" Alert   "),
-        key_span("r"),   Span::raw(" Refresh   "),
-        Span::styled(vol_key, vol_style), Span::raw(" Vol   "),
-        Span::styled(sma_key, sma_style), Span::raw(" SMA   "),
-        key_span("s"),   Span::raw(" Search   "),
-        key_span("b"),   Span::raw(" Back   "),
-        key_span("q"),   Span::raw(" Quit"),
-    ]);
-
-    let footer = Paragraph::new(vec![controls, alert_line])
-        .block(Block::default().borders(Borders::ALL));
-    f.render_widget(footer, area);
+    f.render_widget(Paragraph::new(alert_line), chunks[1]);
 }
 
 fn format_timestamp(dt: &DateTime<Utc>, timeframe: &TimeFrame) -> String {

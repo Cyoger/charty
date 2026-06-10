@@ -6,7 +6,7 @@ use ratatui::{
 	Frame,
 };
 
-use super::{App, LandingPanel};
+use super::{App, LandingPanel, render_nav};
 
 
 fn quote_spans(app: &App, symbol: &str) -> Vec<Span<'static>> {
@@ -232,31 +232,14 @@ pub fn render_landing(f: &mut Frame, app: &App) {
     }
 
     // Footer
-    let footer_line = if app.input_mode {
-        Line::from(vec![
-            key_span("Enter"),  Span::raw(" Confirm   "),
-            key_span("Esc"),    Span::raw(" Cancel"),
-        ])
+    if app.input_mode {
+        render_nav(f, chunks[2], &[("Enter", "Confirm"), ("Esc", "Cancel")]);
     } else {
-        Line::from(vec![
-            key_span("Enter"), Span::raw(" Select   "),
-            key_span("Tab"),   Span::raw(" Switch Panel   "),
-            key_span("s"),     Span::raw(" Search   "),
-            key_span("m"),     Span::raw(" Market   "),
-            key_span("a"),     Span::raw(" Alert   "),
-            key_span("r"),     Span::raw(" Refresh   "),
-            key_span("q"),     Span::raw(" Quit"),
-        ])
-    };
-
-    let footer = Paragraph::new(footer_line)
-        .block(Block::default().borders(Borders::ALL))
-        .alignment(Alignment::Center);
-    f.render_widget(footer, chunks[2]);
-}
-
-fn key_span(k: &'static str) -> Span<'static> {
-    Span::styled(k, Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
+        render_nav(f, chunks[2], &[
+            ("Enter", "Select"), ("Tab", "Switch Panel"), ("s", "Search"),
+            ("m", "Market"), ("a", "Alert"), ("r", "Refresh"), ("q", "Quit"),
+        ]);
+    }
 }
 
 fn truncate(s: &str, max: usize) -> &str {

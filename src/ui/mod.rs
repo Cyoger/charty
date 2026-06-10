@@ -1,6 +1,7 @@
 use ratatui::widgets::ListItem;
 use ratatui::{
-    widgets::ListState,
+    layout::{Alignment, Rect},
+    widgets::{ListState, Paragraph},
     Frame,
 };
 
@@ -14,6 +15,35 @@ use chrono::{DateTime, Utc};
 use ratatui::text::{Line, Span};
 use ratatui::style::{Style, Color, Modifier};
 use ratatui::widgets::{Block, Borders, List, Clear};
+
+// ── Shared navigation bar ────────────────────────────────────────────────────
+
+pub fn nav_key(k: &'static str) -> Span<'static> {
+    Span::styled(k, Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
+}
+
+/// Renders a one-line navigation bar with styled key bindings.
+/// `items` is a slice of (key, description) pairs.
+pub fn render_nav(f: &mut Frame, area: Rect, items: &[(&'static str, &'static str)]) {
+    let spans: Vec<Span> = items
+        .iter()
+        .enumerate()
+        .flat_map(|(i, &(key, desc))| {
+            let mut v: Vec<Span> = Vec::new();
+            if i > 0 {
+                v.push(Span::raw("   "));
+            }
+            v.push(nav_key(key));
+            v.push(Span::raw(format!(" {}", desc)));
+            v
+        })
+        .collect();
+
+    let bar = Paragraph::new(Line::from(spans))
+        .block(Block::default().borders(Borders::ALL))
+        .alignment(Alignment::Center);
+    f.render_widget(bar, area);
+}
 
 mod landing;
 use landing::render_landing;
