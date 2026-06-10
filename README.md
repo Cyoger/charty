@@ -2,7 +2,7 @@
 
 A terminal-based stock market charting and analysis application built in Rust.
 
-![Charty Demo](charty.gif)
+![Charty Demo](assets/charty.gif)
 
 ## Features
 
