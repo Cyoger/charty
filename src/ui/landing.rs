@@ -6,7 +6,7 @@ use ratatui::{
 	Frame,
 };
 
-use super::{App, LandingPanel};
+use super::{App, LandingPanel, render_nav};
 
 
 fn quote_spans(app: &App, symbol: &str) -> Vec<Span<'static>> {
@@ -232,16 +232,14 @@ pub fn render_landing(f: &mut Frame, app: &App) {
     }
 
     // Footer
-    let footer_text = if app.input_mode {
-        "Enter: Confirm | Esc: Cancel"
+    if app.input_mode {
+        render_nav(f, chunks[2], &[("Enter", "Confirm"), ("Esc", "Cancel")]);
     } else {
-        "↑/↓: Navigate | Enter: Select | Tab: Switch | s: Search | a: Alert | m: Market | r: Refresh | d: Remove | q: Quit"
-    };
-
-    let footer = Paragraph::new(footer_text)
-        .block(Block::default().borders(Borders::ALL).title("Controls"))
-        .alignment(Alignment::Center);
-    f.render_widget(footer, chunks[2]);
+        render_nav(f, chunks[2], &[
+            ("Enter", "Select"), ("Tab", "Switch Panel"), ("s", "Search"),
+            ("m", "Market"), ("a", "Alert"), ("r", "Refresh"), ("q", "Quit"),
+        ]);
+    }
 }
 
 fn truncate(s: &str, max: usize) -> &str {

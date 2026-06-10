@@ -6,7 +6,7 @@ use ratatui::{
     Frame,
 };
 
-use super::{App, MarketPanel};
+use super::{App, MarketPanel, render_nav};
 use crate::stock::MarketMover;
 
 fn format_volume(vol: u64) -> String {
@@ -192,10 +192,7 @@ pub fn render_market_view(f: &mut Frame, app: &App) {
     }
 
     // Footer
-    let footer = Paragraph::new(
-        "↑/↓: Navigate | Tab: Switch panel | Enter: View chart | r: Refresh | b: Back | q: Quit",
-    )
-    .block(Block::default().borders(Borders::ALL).title("Controls"))
-    .alignment(Alignment::Center);
-    f.render_widget(footer, chunks[2]);
+    render_nav(f, chunks[2], &[
+        ("↑/↓", "Navigate"), ("Tab", "Switch"), ("Enter", "View"), ("r", "Refresh"), ("b", "Back"), ("q", "Quit")
+    ]);
 }
